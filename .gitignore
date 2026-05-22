@@ -3,3 +3,6 @@
 .env.*
 *.pem
 .DS_Store
+*.checkpoint.json
+checkpoints/
+models/

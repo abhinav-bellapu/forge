@@ -3,9 +3,10 @@
 #![allow(dead_code)] // full API surface; not every method used by the binary yet
 
 use anyhow::bail;
+use serde::{Deserialize, Serialize};
 
 /// Dense tensor stored in row-major order.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tensor {
     pub data: Vec<f32>,
     pub shape: Vec<usize>,
@@ -490,5 +491,13 @@ mod tests {
     fn last_row_rejects_non_2d() {
         let t = Tensor::new(vec![1.0, 2.0], vec![2]).unwrap();
         assert!(t.last_row().is_err());
+    }
+
+    #[test]
+    fn tensor_serde_roundtrip() {
+        let t = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]).unwrap();
+        let json = serde_json::to_string(&t).unwrap();
+        let restored: Tensor = serde_json::from_str(&json).unwrap();
+        assert_eq!(t, restored);
     }
 }

@@ -4,29 +4,47 @@ A tiny Rust inference runtime for transformer language models.
 
 ## Current status
 
-Sprint 8 — improved sampling
+Sprint 9 — checkpoint save/load
 
 ## Implemented
 
 - Project skeleton and CLI (`forge generate`)
 - Character-level tokenizer (`vocab.json`, encode/decode)
-- Tensor engine:
-  - Core: shapes, indexing, `add`, `matmul`, 1D `softmax`, `last_row`
-  - Attention prep: `transpose_2d`, `scalar_mul`, `scalar_div`, `softmax_rows`, `row`
-- Self-attention: scaled dot-product (`Attention::scaled_dot_product`)
-- Minimal model: embeddings, Q/K/V projections, forward pass (`TinyModel::forward`)
-- Autoregressive decoding with configurable sampling:
-  - Greedy (`--temperature 0`)
-  - Full-vocab temperature sampling
-  - Top-k sampling (`--top-k N`)
-  - Seeded generation (`--seed`)
+- Tensor engine, self-attention, minimal `TinyModel` forward pass
+- Autoregressive decoding (greedy, temperature, top-k, seeded sampling)
+- JSON checkpoint save/load for model weights
 
 ## Quick start
 
 ```bash
 cargo build
 cargo test
+```
+
+### Random generation (default)
+
+```bash
 cargo run -- generate --prompt "hello"
 cargo run -- generate --prompt "hello" --temperature 0 --seed 42
 cargo run -- generate --prompt "hello" --temperature 0.8 --top-k 10 --seed 42
 ```
+
+### Checkpoints
+
+Save a random model to JSON:
+
+```bash
+cargo run -- save-random-checkpoint --output model.json --seed 42
+```
+
+Generate using saved weights:
+
+```bash
+cargo run -- generate --prompt "hello" --checkpoint model.json --temperature 0 --seed 42
+```
+
+Checkpoints are local JSON only (no cloud APIs, no external model formats).
+
+## Ignored artifacts
+
+Generated checkpoints are gitignored (`*.checkpoint.json`, `checkpoints/`, `models/`). Do not commit large weight files unless intentional.

@@ -1,5 +1,7 @@
-use crate::cli::{Command, GenerateArgs};
+use crate::checkpoint::load_checkpoint;
+use crate::cli::GenerateArgs;
 use crate::model::{ModelConfig, TinyModel};
+use std::path::Path;
 use crate::sampling::Sampler;
 use crate::tokenizer::{self, Tokenizer};
 use anyhow::bail;
@@ -56,21 +58,34 @@ pub fn validate_request(req: &GenerateRequest) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Load tokenizer and a randomly initialized model for inference.
-pub fn load_tokenizer_and_model(seed: u64) -> anyhow::Result<(Tokenizer, TinyModel)> {
+/// Load tokenizer and model (from checkpoint or random initialization).
+pub fn load_tokenizer_and_model(
+    seed: u64,
+    checkpoint: Option<&Path>,
+) -> anyhow::Result<(Tokenizer, TinyModel)> {
     let tokenizer = Tokenizer::from_file(tokenizer::default_vocab_path())?;
-    let config = model_config_for_tokenizer(&tokenizer);
-    let model = TinyModel::new_random(config, seed)?;
+
+    let model = if let Some(path) = checkpoint {
+        let loaded = load_checkpoint(path)?;
+        if loaded.config.vocab_size != tokenizer.vocab_size() {
+            bail!(
+                "checkpoint vocab_size {} does not match tokenizer vocab_size {}",
+                loaded.config.vocab_size,
+                tokenizer.vocab_size()
+            );
+        }
+        loaded
+    } else {
+        let config = model_config_for_tokenizer(&tokenizer);
+        TinyModel::new_random(config, seed)?
+    };
+
     Ok((tokenizer, model))
 }
 
 /// Build model config aligned with the loaded tokenizer.
 pub fn model_config_for_tokenizer(tokenizer: &Tokenizer) -> ModelConfig {
-    ModelConfig {
-        vocab_size: tokenizer.vocab_size(),
-        max_seq_len: 64,
-        d_model: 16,
-    }
+    ModelConfig::for_vocab(tokenizer.vocab_size())
 }
 
 /// Choose the next token from the final-position logits.
@@ -143,21 +158,19 @@ pub fn generate(
     })
 }
 
-/// Run generation from CLI flags and print results.
-pub fn run_from_cli(command: &Command) -> anyhow::Result<()> {
-    match command {
-        Command::Generate(args) => {
-            let req = GenerateRequest::from(args);
-            let seed = req.seed.unwrap_or(42);
-            let (tokenizer, model) = load_tokenizer_and_model(seed)?;
-            let result = generate(&req, &tokenizer, &model)?;
+/// Run `forge generate` and print results.
+pub fn run_generate(args: &GenerateArgs) -> anyhow::Result<()> {
+    let req = GenerateRequest::from(args);
+    let seed = req.seed.unwrap_or(42);
+    let (tokenizer, model) =
+        load_tokenizer_and_model(seed, args.checkpoint.as_deref())?;
+    let result = generate(&req, &tokenizer, &model)?;
 
-            println!("Prompt: {}", req.prompt);
-            println!("Input Tokens: {:?}", result.input_tokens);
-            println!("Generated Tokens: {:?}", result.generated_tokens);
-            println!("Output: {}", result.output_text);
-        }
-    }
+    println!("Prompt: {}", req.prompt);
+    println!("Input Tokens: {:?}", result.input_tokens);
+    println!("Generated Tokens: {:?}", result.generated_tokens);
+    println!("Output: {}", result.output_text);
+
     Ok(())
 }
 
@@ -176,7 +189,7 @@ mod tests {
     }
 
     fn test_setup(seed: u64) -> (Tokenizer, TinyModel) {
-        load_tokenizer_and_model(seed).unwrap()
+        load_tokenizer_and_model(seed, None).unwrap()
     }
 
     #[test]

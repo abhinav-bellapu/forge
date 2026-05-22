@@ -5,9 +5,10 @@ use crate::tensor::Tensor;
 use anyhow::bail;
 use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
+use serde::{Deserialize, Serialize};
 
 /// Hyperparameters for [`TinyModel`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelConfig {
     pub vocab_size: usize,
     pub max_seq_len: usize,
@@ -15,6 +16,15 @@ pub struct ModelConfig {
 }
 
 impl ModelConfig {
+    /// Default inference hyperparameters for a given vocabulary size.
+    pub fn for_vocab(vocab_size: usize) -> Self {
+        Self {
+            vocab_size,
+            max_seq_len: 64,
+            d_model: 16,
+        }
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.vocab_size == 0 {
             bail!("vocab_size must be greater than 0");
@@ -30,7 +40,7 @@ impl ModelConfig {
 }
 
 /// Tiny language model: embeddings, single-head attention, vocab logits.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TinyModel {
     pub config: ModelConfig,
 
@@ -106,6 +116,24 @@ impl TinyModel {
         Ok(logits)
     }
 
+    /// Verify that weight tensor shapes match [`ModelConfig`].
+    pub fn validate_shapes(&self) -> anyhow::Result<()> {
+        self.config.validate()?;
+
+        let vs = self.config.vocab_size;
+        let msl = self.config.max_seq_len;
+        let dm = self.config.d_model;
+
+        expect_shape(&self.token_embeddings, &[vs, dm], "token_embeddings")?;
+        expect_shape(&self.positional_embeddings, &[msl, dm], "positional_embeddings")?;
+        expect_shape(&self.w_q, &[dm, dm], "w_q")?;
+        expect_shape(&self.w_k, &[dm, dm], "w_k")?;
+        expect_shape(&self.w_v, &[dm, dm], "w_v")?;
+        expect_shape(&self.w_o, &[dm, vs], "w_o")?;
+
+        Ok(())
+    }
+
     fn validate_token_ids(&self, token_ids: &[usize]) -> anyhow::Result<()> {
         if token_ids.is_empty() {
             bail!("token_ids cannot be empty");
@@ -124,6 +152,16 @@ impl TinyModel {
         }
         Ok(())
     }
+}
+
+fn expect_shape(tensor: &Tensor, expected: &[usize], name: &str) -> anyhow::Result<()> {
+    if tensor.shape() != expected {
+        bail!(
+            "{name} shape mismatch: expected {expected:?}, got {:?}",
+            tensor.shape()
+        );
+    }
+    Ok(())
 }
 
 fn random_tensor(rows: usize, cols: usize, rng: &mut StdRng) -> anyhow::Result<Tensor> {
@@ -217,5 +255,19 @@ mod tests {
         let a = TinyModel::new_random(cfg.clone(), 1).unwrap();
         let b = TinyModel::new_random(cfg, 2).unwrap();
         assert_ne!(a.token_embeddings.data, b.token_embeddings.data);
+    }
+
+    #[test]
+    fn validate_shapes_accepts_correct_model() {
+        let model = TinyModel::new_random(test_config(), 1).unwrap();
+        assert!(model.validate_shapes().is_ok());
+    }
+
+    #[test]
+    fn validate_shapes_rejects_mismatched_weights() {
+        let mut model = TinyModel::new_random(test_config(), 1).unwrap();
+        model.w_o = Tensor::new(vec![0.0; 4], vec![2, 2]).unwrap();
+        let err = model.validate_shapes().unwrap_err();
+        assert!(err.to_string().contains("w_o"));
     }
 }
