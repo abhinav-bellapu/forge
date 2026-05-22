@@ -1,7 +1,5 @@
 //! Minimal transformer-style forward pass (embeddings + attention + logits).
 
-#![allow(dead_code)] // wired into generation in Sprint 7+
-
 use crate::attention::Attention;
 use crate::tensor::Tensor;
 use anyhow::bail;

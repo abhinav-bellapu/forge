@@ -10,7 +10,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Generate text from a prompt (stub in Sprint 1).
+    /// Generate text from a prompt.
     Generate(GenerateArgs),
 }
 
@@ -24,7 +24,7 @@ pub struct GenerateArgs {
     #[arg(long, default_value_t = 20)]
     pub max_new_tokens: u32,
 
-    /// Sampling temperature (must be > 0).
+    /// Sampling temperature (0 = greedy argmax, >0 = stochastic).
     #[arg(long, default_value_t = 1.0)]
     pub temperature: f32,
 

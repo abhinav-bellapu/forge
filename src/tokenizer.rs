@@ -103,7 +103,6 @@ impl Tokenizer {
     }
 
     /// Number of entries in the vocabulary.
-    #[allow(dead_code)]
     pub fn vocab_size(&self) -> usize {
         self.token_to_id.len()
     }

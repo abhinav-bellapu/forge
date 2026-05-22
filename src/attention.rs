@@ -1,6 +1,5 @@
 //! Scaled dot-product self-attention.
 
-
 use crate::tensor::Tensor;
 use anyhow::bail;
 

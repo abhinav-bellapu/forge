@@ -1,6 +1,6 @@
 //! Tensor operations for Forge inference (row-major `f32` storage).
 
-#![allow(dead_code)] // used by model unit tests; CLI generation uses this in Sprint 7+
+#![allow(dead_code)] // full API surface; not every method used by the binary yet
 
 use anyhow::bail;
 
@@ -240,6 +240,22 @@ impl Tensor {
         Self::new(data, vec![cols])
     }
 
+    /// Return the final row of a 2D tensor as a `Vec<f32>`.
+    pub fn last_row(&self) -> anyhow::Result<Vec<f32>> {
+        if self.ndim() != 2 {
+            bail!("last_row requires 2D tensor, got {}D", self.ndim());
+        }
+
+        let rows = self.shape[0];
+        let cols = self.shape[1];
+        if rows == 0 {
+            bail!("cannot take last row of tensor with zero rows");
+        }
+
+        let start = (rows - 1) * cols;
+        Ok(self.data[start..start + cols].to_vec())
+    }
+
     /// Apply softmax independently to each row of a 2D tensor.
     pub fn softmax_rows(&self) -> anyhow::Result<Tensor> {
         if self.ndim() != 2 {
@@ -462,5 +478,17 @@ mod tests {
     fn softmax_rows_rejects_non_2d() {
         let t = Tensor::new(vec![1.0, 2.0, 3.0], vec![3]).unwrap();
         assert!(t.softmax_rows().is_err());
+    }
+
+    #[test]
+    fn last_row_correctness() {
+        let t = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
+        assert_eq!(t.last_row().unwrap(), vec![4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn last_row_rejects_non_2d() {
+        let t = Tensor::new(vec![1.0, 2.0], vec![2]).unwrap();
+        assert!(t.last_row().is_err());
     }
 }
