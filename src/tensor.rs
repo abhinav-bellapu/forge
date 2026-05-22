@@ -1,6 +1,6 @@
 //! Tensor operations for Forge inference (row-major `f32` storage).
 
-#![allow(dead_code)] // used by unit tests; model/attention will use this in Sprint 4+
+#![allow(dead_code)] // used by unit tests; attention/model will use this in Sprint 5+
 
 use anyhow::bail;
 
@@ -179,6 +179,87 @@ impl Tensor {
         let data: Vec<f32> = exps.into_iter().map(|e| e / sum).collect();
         Self::new(data, self.shape.clone())
     }
+
+    /// Transpose a 2D tensor: `[rows, cols]` → `[cols, rows]`.
+    pub fn transpose_2d(&self) -> anyhow::Result<Tensor> {
+        if self.ndim() != 2 {
+            bail!("transpose_2d requires 2D tensor, got {}D", self.ndim());
+        }
+
+        let rows = self.shape[0];
+        let cols = self.shape[1];
+        let mut out = vec![0.0; rows * cols];
+
+        for r in 0..rows {
+            for c in 0..cols {
+                out[c * rows + r] = self.data[r * cols + c];
+            }
+        }
+
+        Self::new(out, vec![cols, rows])
+    }
+
+    /// Multiply every element by a scalar.
+    pub fn scalar_mul(&self, scalar: f32) -> Tensor {
+        let data: Vec<f32> = self.data.iter().map(|x| x * scalar).collect();
+        Tensor {
+            data,
+            shape: self.shape.clone(),
+        }
+    }
+
+    /// Divide every element by a scalar.
+    pub fn scalar_div(&self, scalar: f32) -> anyhow::Result<Tensor> {
+        if scalar == 0.0 {
+            bail!("scalar division by zero");
+        }
+        let data: Vec<f32> = self.data.iter().map(|x| x / scalar).collect();
+        Ok(Tensor {
+            data,
+            shape: self.shape.clone(),
+        })
+    }
+
+    /// Extract one row from a 2D tensor as a 1D tensor.
+    pub fn row(&self, row_index: usize) -> anyhow::Result<Tensor> {
+        if self.ndim() != 2 {
+            bail!("row requires 2D tensor, got {}D", self.ndim());
+        }
+
+        let rows = self.shape[0];
+        let cols = self.shape[1];
+        if row_index >= rows {
+            bail!("row index {row_index} out of bounds for {rows} rows");
+        }
+
+        let mut data = Vec::with_capacity(cols);
+        for c in 0..cols {
+            data.push(self.data[row_index * cols + c]);
+        }
+
+        Self::new(data, vec![cols])
+    }
+
+    /// Apply softmax independently to each row of a 2D tensor.
+    pub fn softmax_rows(&self) -> anyhow::Result<Tensor> {
+        if self.ndim() != 2 {
+            bail!("softmax_rows only supports 2D tensors, got {}D", self.ndim());
+        }
+
+        let rows = self.shape[0];
+        let cols = self.shape[1];
+        let mut out = Vec::with_capacity(rows * cols);
+
+        for r in 0..rows {
+            let row = self.row(r)?;
+            let sm = row.softmax()?;
+            for c in 0..cols {
+                out.push(sm.data[c]);
+            }
+        }
+
+        Self::new(out, self.shape.clone())
+    }
 }
 
 #[cfg(test)]
@@ -305,5 +386,81 @@ mod tests {
     fn softmax_rejects_2d() {
         let t = Tensor::new(vec![1.0; 4], vec![2, 2]).unwrap();
         assert!(t.softmax().is_err());
+    }
+
+    #[test]
+    fn transpose_2d_correctness() {
+        let t = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
+        let tt = t.transpose_2d().unwrap();
+        assert_eq!(tt.shape(), &[3, 2]);
+        assert_eq!(tt.get2d(0, 0).unwrap(), 1.0);
+        assert_eq!(tt.get2d(0, 1).unwrap(), 4.0);
+        assert_eq!(tt.get2d(1, 0).unwrap(), 2.0);
+        assert_eq!(tt.get2d(1, 1).unwrap(), 5.0);
+        assert_eq!(tt.get2d(2, 0).unwrap(), 3.0);
+        assert_eq!(tt.get2d(2, 1).unwrap(), 6.0);
+    }
+
+    #[test]
+    fn transpose_2d_rejects_non_2d() {
+        let t = Tensor::new(vec![1.0, 2.0, 3.0], vec![3]).unwrap();
+        assert!(t.transpose_2d().is_err());
+    }
+
+    #[test]
+    fn scalar_mul_correctness() {
+        let t = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]).unwrap();
+        let out = t.scalar_mul(2.0);
+        assert_eq!(out.data, vec![2.0, 4.0, 6.0, 8.0]);
+        assert_eq!(out.shape(), t.shape());
+    }
+
+    #[test]
+    fn scalar_div_correctness() {
+        let t = Tensor::new(vec![2.0, 4.0, 6.0, 8.0], vec![2, 2]).unwrap();
+        let out = t.scalar_div(2.0).unwrap();
+        assert_eq!(out.data, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn scalar_div_rejects_zero() {
+        let t = Tensor::new(vec![1.0], vec![1]).unwrap();
+        assert!(t.scalar_div(0.0).is_err());
+    }
+
+    #[test]
+    fn softmax_rows_keeps_shape() {
+        let t = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
+        let s = t.softmax_rows().unwrap();
+        assert_eq!(s.shape(), &[2, 3]);
+    }
+
+    #[test]
+    fn softmax_rows_each_row_sums_to_one() {
+        let t = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
+        let s = t.softmax_rows().unwrap();
+        for r in 0..2 {
+            let mut sum = 0.0f32;
+            for c in 0..3 {
+                sum += s.get2d(r, c).unwrap();
+            }
+            assert!((sum - 1.0).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn softmax_rows_preserves_ordering_within_row() {
+        let t = Tensor::new(vec![3.0, 1.0, 2.0, 0.5, 2.5, 1.5], vec![2, 3]).unwrap();
+        let s = t.softmax_rows().unwrap();
+        assert!(s.get2d(0, 0).unwrap() > s.get2d(0, 2).unwrap());
+        assert!(s.get2d(0, 2).unwrap() > s.get2d(0, 1).unwrap());
+        assert!(s.get2d(1, 1).unwrap() > s.get2d(1, 2).unwrap());
+        assert!(s.get2d(1, 2).unwrap() > s.get2d(1, 0).unwrap());
+    }
+
+    #[test]
+    fn softmax_rows_rejects_non_2d() {
+        let t = Tensor::new(vec![1.0, 2.0, 3.0], vec![3]).unwrap();
+        assert!(t.softmax_rows().is_err());
     }
 }
