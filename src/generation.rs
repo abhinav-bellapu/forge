@@ -1,4 +1,5 @@
 use crate::cli::{Command, GenerateArgs};
+use crate::tokenizer::{self, Tokenizer};
 
 /// Parameters for a single generation request.
 #[derive(Debug, Clone, PartialEq)]
@@ -45,8 +46,14 @@ pub fn run_from_cli(command: &Command) -> anyhow::Result<()> {
     match command {
         Command::Generate(args) => {
             let req = GenerateRequest::from(args);
+            let tok = Tokenizer::from_file(tokenizer::default_vocab_path())?;
+            let token_ids = tok.encode(&req.prompt, false, false);
+            let decoded = tok.decode(&token_ids, true)?;
+
             let output = generate_stub(&req)?;
             println!("Prompt: {}", req.prompt);
+            println!("Tokens: {:?}", token_ids);
+            println!("Decoded: {}", decoded);
             println!("Generated: {}", output);
         }
     }
