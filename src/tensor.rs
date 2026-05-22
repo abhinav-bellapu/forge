@@ -1,6 +1,6 @@
 //! Tensor operations for Forge inference (row-major `f32` storage).
 
-#![allow(dead_code)] // used by unit tests; attention/model will use this in Sprint 5+
+#![allow(dead_code)] // used by unit tests; model will use this in Sprint 6+
 
 use anyhow::bail;
 

@@ -4,7 +4,7 @@ A tiny Rust inference runtime for transformer language models.
 
 ## Current status
 
-Sprint 4 — tensor ops for attention
+Sprint 5 — self-attention
 
 ## Implemented
 
@@ -13,6 +13,7 @@ Sprint 4 — tensor ops for attention
 - Tensor engine:
   - Core: shapes, indexing, `add`, `matmul`, 1D `softmax`
   - Attention prep: `transpose_2d`, `scalar_mul`, `scalar_div`, `softmax_rows`, `row`
+- Self-attention: scaled dot-product (`Attention::scaled_dot_product`)
 
 ## Quick start
 
