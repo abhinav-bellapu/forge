@@ -31,6 +31,10 @@ pub struct GenerateArgs {
     /// Optional RNG seed for reproducible sampling.
     #[arg(long)]
     pub seed: Option<u64>,
+
+    /// Top-k sampling: only consider the k highest logits (requires temperature > 0).
+    #[arg(long)]
+    pub top_k: Option<usize>,
 }
 
 pub fn parse() -> anyhow::Result<Command> {

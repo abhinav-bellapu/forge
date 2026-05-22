@@ -13,6 +13,7 @@ pub struct GenerateRequest {
     pub max_new_tokens: u32,
     pub temperature: f32,
     pub seed: Option<u64>,
+    pub top_k: Option<usize>,
 }
 
 /// Result of autoregressive generation.
@@ -31,6 +32,7 @@ impl From<&GenerateArgs> for GenerateRequest {
             max_new_tokens: args.max_new_tokens,
             temperature: args.temperature,
             seed: args.seed,
+            top_k: args.top_k,
         }
     }
 }
@@ -46,7 +48,50 @@ pub fn validate_request(req: &GenerateRequest) -> anyhow::Result<()> {
     if req.temperature < 0.0 {
         bail!("temperature must be >= 0");
     }
+    if let Some(k) = req.top_k {
+        if k == 0 {
+            bail!("top_k must be greater than 0");
+        }
+    }
     Ok(())
+}
+
+/// Load tokenizer and a randomly initialized model for inference.
+pub fn load_tokenizer_and_model(seed: u64) -> anyhow::Result<(Tokenizer, TinyModel)> {
+    let tokenizer = Tokenizer::from_file(tokenizer::default_vocab_path())?;
+    let config = model_config_for_tokenizer(&tokenizer);
+    let model = TinyModel::new_random(config, seed)?;
+    Ok((tokenizer, model))
+}
+
+/// Build model config aligned with the loaded tokenizer.
+pub fn model_config_for_tokenizer(tokenizer: &Tokenizer) -> ModelConfig {
+    ModelConfig {
+        vocab_size: tokenizer.vocab_size(),
+        max_seq_len: 64,
+        d_model: 16,
+    }
+}
+
+/// Choose the next token from the final-position logits.
+fn sample_next_token(
+    logits: &[f32],
+    req: &GenerateRequest,
+    rng: &mut StdRng,
+) -> anyhow::Result<usize> {
+    if logits.is_empty() {
+        bail!("model produced empty logits row");
+    }
+
+    if req.temperature == 0.0 {
+        return Sampler::argmax(logits);
+    }
+
+    if let Some(k) = req.top_k {
+        return Sampler::sample_top_k(logits, req.temperature, k, rng);
+    }
+
+    Sampler::sample_with_temperature(logits, req.temperature, rng)
 }
 
 /// Autoregressive generation: forward → sample → append → decode.
@@ -83,16 +128,7 @@ pub fn generate(
 
         let logits = model.forward(&tokens)?;
         let last_logits = logits.last_row()?;
-        if last_logits.is_empty() {
-            bail!("model produced empty logits row");
-        }
-
-        let next_token = if req.temperature == 0.0 {
-            Sampler::argmax(&last_logits)?
-        } else {
-            Sampler::sample_with_temperature(&last_logits, req.temperature, &mut sample_rng)?
-        };
-
+        let next_token = sample_next_token(&last_logits, req, &mut sample_rng)?;
         tokens.push(next_token);
     }
 
@@ -107,25 +143,13 @@ pub fn generate(
     })
 }
 
-/// Build model config aligned with the loaded tokenizer.
-pub fn model_config_for_tokenizer(tokenizer: &Tokenizer) -> ModelConfig {
-    ModelConfig {
-        vocab_size: tokenizer.vocab_size(),
-        max_seq_len: 64,
-        d_model: 16,
-    }
-}
-
 /// Run generation from CLI flags and print results.
 pub fn run_from_cli(command: &Command) -> anyhow::Result<()> {
     match command {
         Command::Generate(args) => {
             let req = GenerateRequest::from(args);
-            let tokenizer = Tokenizer::from_file(tokenizer::default_vocab_path())?;
             let seed = req.seed.unwrap_or(42);
-            let config = model_config_for_tokenizer(&tokenizer);
-            let model = TinyModel::new_random(config, seed)?;
-
+            let (tokenizer, model) = load_tokenizer_and_model(seed)?;
             let result = generate(&req, &tokenizer, &model)?;
 
             println!("Prompt: {}", req.prompt);
@@ -147,14 +171,12 @@ mod tests {
             max_new_tokens: 4,
             temperature: 0.0,
             seed: Some(42),
+            top_k: None,
         }
     }
 
     fn test_setup(seed: u64) -> (Tokenizer, TinyModel) {
-        let tokenizer = Tokenizer::from_file(tokenizer::default_vocab_path()).unwrap();
-        let config = model_config_for_tokenizer(&tokenizer);
-        let model = TinyModel::new_random(config, seed).unwrap();
-        (tokenizer, model)
+        load_tokenizer_and_model(seed).unwrap()
     }
 
     #[test]
@@ -180,6 +202,14 @@ mod tests {
         req.temperature = -1.0;
         let err = validate_request(&req).unwrap_err();
         assert!(err.to_string().contains("temperature"));
+    }
+
+    #[test]
+    fn zero_top_k_errors() {
+        let mut req = sample_request();
+        req.top_k = Some(0);
+        let err = validate_request(&req).unwrap_err();
+        assert!(err.to_string().contains("top_k"));
     }
 
     #[test]
@@ -219,6 +249,7 @@ mod tests {
             max_new_tokens: 8,
             temperature: 1.0,
             seed: Some(1),
+            top_k: None,
         };
 
         let (tok_a, model_a) = test_setup(1);
@@ -233,5 +264,24 @@ mod tests {
         let out_b = generate(&req_b, &tok_b, &model_b).unwrap();
 
         assert_ne!(out_a.generated_tokens, out_b.generated_tokens);
+    }
+
+    #[test]
+    fn top_k_generation_is_deterministic_with_seed() {
+        let req = GenerateRequest {
+            prompt: "hi".to_string(),
+            max_new_tokens: 6,
+            temperature: 1.0,
+            seed: Some(7),
+            top_k: Some(5),
+        };
+
+        let (tok_a, model_a) = test_setup(7);
+        let (tok_b, model_b) = test_setup(7);
+
+        let out_a = generate(&req, &tok_a, &model_a).unwrap();
+        let out_b = generate(&req, &tok_b, &model_b).unwrap();
+
+        assert_eq!(out_a.generated_tokens, out_b.generated_tokens);
     }
 }
