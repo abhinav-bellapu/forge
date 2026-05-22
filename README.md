@@ -4,7 +4,7 @@ A tiny Rust inference runtime for transformer language models.
 
 ## Current status
 
-Sprint 9 — checkpoint save/load
+Sprint 10 — KV cache
 
 ## Implemented
 
@@ -13,6 +13,7 @@ Sprint 9 — checkpoint save/load
 - Tensor engine, self-attention, minimal `TinyModel` forward pass
 - Autoregressive decoding (greedy, temperature, top-k, seeded sampling)
 - JSON checkpoint save/load for model weights
+- KV-cached decoding and incremental generation (optimized autoregressive inference)
 
 ## Quick start
 

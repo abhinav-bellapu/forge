@@ -1,6 +1,6 @@
 //! Minimal transformer-style forward pass (embeddings + attention + logits).
 
-use crate::attention::Attention;
+use crate::attention::{Attention, KvCache};
 use crate::tensor::Tensor;
 use anyhow::bail;
 use rand::{Rng, SeedableRng};
@@ -103,8 +103,35 @@ impl TinyModel {
         Tensor::new(data, vec![seq_len, d_model])
     }
 
-    /// Full forward pass: embeddings → Q/K/V → attention → logits.
+    /// Embed a single token at a sequence position.
     ///
+    /// Output shape: `[1, d_model]`.
+    pub fn embed_token(&self, token_id: usize, position: usize) -> anyhow::Result<Tensor> {
+        if token_id >= self.config.vocab_size {
+            bail!("token id {token_id} is out of vocab range");
+        }
+        if position >= self.config.max_seq_len {
+            bail!(
+                "position {position} exceeds max_seq_len {}",
+                self.config.max_seq_len
+            );
+        }
+
+        let d_model = self.config.d_model;
+        let mut data = vec![0.0; d_model];
+        for d in 0..d_model {
+            let token_vec = self.token_embeddings.get2d(token_id, d)?;
+            let pos_vec = self.positional_embeddings.get2d(position, d)?;
+            data[d] = token_vec + pos_vec;
+        }
+
+        Tensor::new(data, vec![1, d_model])
+    }
+
+    /// Full forward pass: embeddings → causal Q/K/V attention → logits.
+    ///
+    /// Recomputes attention over the entire sequence each call (no KV cache).
+    /// Uses causal masking so logits match incremental KV-cache decoding.
     /// Output shape: `[seq_len, vocab_size]`.
     pub fn forward(&self, token_ids: &[usize]) -> anyhow::Result<Tensor> {
         let x = self.embed_tokens(token_ids)?;
@@ -112,6 +139,43 @@ impl TinyModel {
         let k = x.matmul(&self.w_k)?;
         let v = x.matmul(&self.w_v)?;
         let context = Attention::scaled_dot_product(&q, &k, &v)?;
+        let logits = context.matmul(&self.w_o)?;
+        Ok(logits)
+    }
+
+    /// Incremental forward for one new token using a KV cache.
+    ///
+    /// Embeds only the new token, appends its K/V rows to `cache`, runs cached
+    /// attention, and returns logits for that position.
+    ///
+    /// `position` must equal the cache length before append.
+    ///
+    /// Output shape: `[1, vocab_size]`.
+    pub fn forward_incremental(
+        &self,
+        token_id: usize,
+        position: usize,
+        cache: &mut KvCache,
+    ) -> anyhow::Result<Tensor> {
+        if position != cache.len() {
+            bail!(
+                "position {position} does not match cache length {}",
+                cache.len()
+            );
+        }
+
+        let x = self.embed_token(token_id, position)?;
+        let q = x.matmul(&self.w_q)?;
+        let k = x.matmul(&self.w_k)?;
+        let v = x.matmul(&self.w_v)?;
+
+        if cache.len() == 0 {
+            *cache = KvCache::new(k, v)?;
+        } else {
+            cache.append(&k, &v)?;
+        }
+
+        let context = Attention::scaled_dot_product_cached(&q, cache)?;
         let logits = context.matmul(&self.w_o)?;
         Ok(logits)
     }
@@ -175,6 +239,7 @@ fn random_tensor(rows: usize, cols: usize, rng: &mut StdRng) -> anyhow::Result<T
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::attention::KvCache;
 
     fn test_config() -> ModelConfig {
         ModelConfig {
@@ -261,6 +326,48 @@ mod tests {
     fn validate_shapes_accepts_correct_model() {
         let model = TinyModel::new_random(test_config(), 1).unwrap();
         assert!(model.validate_shapes().is_ok());
+    }
+
+    #[test]
+    fn incremental_forward_output_shape() {
+        let model = TinyModel::new_random(test_config(), 7).unwrap();
+        let mut cache = KvCache::empty(4).unwrap();
+        let logits = model.forward_incremental(2, 0, &mut cache).unwrap();
+        assert_eq!(logits.shape(), &[1, 16]);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn incremental_forward_matches_causal_full_forward() {
+        let model = TinyModel::new_random(test_config(), 11).unwrap();
+        let token_ids = [2usize, 5, 7];
+
+        let full_logits = model.forward(&token_ids).unwrap();
+        let mut cache = KvCache::empty(4).unwrap();
+
+        for (pos, &tid) in token_ids.iter().enumerate() {
+            let incremental = model.forward_incremental(tid, pos, &mut cache).unwrap();
+            let inc_row = incremental.last_row().unwrap();
+            let full_row: Vec<f32> = (0..full_logits.shape()[1])
+                .map(|c| full_logits.get2d(pos, c).unwrap())
+                .collect();
+
+            assert_eq!(inc_row.len(), full_row.len());
+            for (a, b) in inc_row.iter().zip(full_row.iter()) {
+                assert!(
+                    (a - b).abs() < 1e-5,
+                    "logit mismatch at position {pos}: {a} vs {b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_forward_rejects_invalid_position() {
+        let model = TinyModel::new_random(test_config(), 1).unwrap();
+        let mut cache = KvCache::empty(4).unwrap();
+        let err = model.forward_incremental(1, 1, &mut cache).unwrap_err();
+        assert!(err.to_string().contains("position"));
     }
 
     #[test]

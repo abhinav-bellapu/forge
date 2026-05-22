@@ -19,6 +19,17 @@ impl Tensor {
         Ok(Self { data, shape })
     }
 
+    /// Create an empty 2D tensor with shape `[0, cols]` (used for KV cache warm-up).
+    pub fn empty_rows(cols: usize) -> anyhow::Result<Self> {
+        if cols == 0 {
+            bail!("cols must be greater than 0");
+        }
+        Ok(Self {
+            data: vec![],
+            shape: vec![0, cols],
+        })
+    }
+
     /// Create a tensor filled with zeros.
     pub fn zeros(shape: Vec<usize>) -> anyhow::Result<Self> {
         if shape.is_empty() {
@@ -257,6 +268,35 @@ impl Tensor {
         Ok(self.data[start..start + cols].to_vec())
     }
 
+    /// Concatenate two 2D tensors along rows: `[m, n] + [k, n] -> [m + k, n]`.
+    pub fn concat_rows(&self, other: &Tensor) -> anyhow::Result<Tensor> {
+        if self.ndim() != 2 {
+            bail!("concat_rows requires 2D left tensor, got {}D", self.ndim());
+        }
+        if other.ndim() != 2 {
+            bail!("concat_rows requires 2D right tensor, got {}D", other.ndim());
+        }
+
+        let rows_a = self.shape[0];
+        let cols_a = self.shape[1];
+        let rows_b = other.shape[0];
+        let cols_b = other.shape[1];
+
+        if cols_a != cols_b {
+            bail!(
+                "concat_rows column mismatch: {} vs {}",
+                cols_a,
+                cols_b
+            );
+        }
+
+        let mut data = Vec::with_capacity(self.data.len() + other.data.len());
+        data.extend_from_slice(&self.data);
+        data.extend_from_slice(&other.data);
+
+        Tensor::new(data, vec![rows_a + rows_b, cols_a])
+    }
+
     /// Apply softmax independently to each row of a 2D tensor.
     pub fn softmax_rows(&self) -> anyhow::Result<Tensor> {
         if self.ndim() != 2 {
@@ -491,6 +531,30 @@ mod tests {
     fn last_row_rejects_non_2d() {
         let t = Tensor::new(vec![1.0, 2.0], vec![2]).unwrap();
         assert!(t.last_row().is_err());
+    }
+
+    #[test]
+    fn concat_rows_correctness() {
+        let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]).unwrap();
+        let b = Tensor::new(vec![5.0, 6.0], vec![1, 2]).unwrap();
+        let c = a.concat_rows(&b).unwrap();
+        assert_eq!(c.shape(), &[3, 2]);
+        assert_eq!(c.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn concat_rows_rejects_mismatched_cols() {
+        let a = Tensor::new(vec![1.0; 4], vec![2, 2]).unwrap();
+        let b = Tensor::new(vec![1.0; 6], vec![2, 3]).unwrap();
+        let err = a.concat_rows(&b).unwrap_err();
+        assert!(err.to_string().contains("column"));
+    }
+
+    #[test]
+    fn concat_rows_rejects_non_2d() {
+        let a = Tensor::new(vec![1.0, 2.0], vec![2]).unwrap();
+        let b = Tensor::new(vec![1.0; 4], vec![2, 2]).unwrap();
+        assert!(a.concat_rows(&b).is_err());
     }
 
     #[test]

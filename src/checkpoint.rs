@@ -77,6 +77,7 @@ pub fn run_save_random_checkpoint(output: &Path, seed: u64) -> anyhow::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use crate::generation::{generate, GenerateRequest};
     use crate::model::ModelConfig;
 

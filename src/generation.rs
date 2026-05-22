@@ -1,3 +1,4 @@
+use crate::attention::KvCache;
 use crate::checkpoint::load_checkpoint;
 use crate::cli::GenerateArgs;
 use crate::model::{ModelConfig, TinyModel};
@@ -109,7 +110,11 @@ fn sample_next_token(
     Sampler::sample_with_temperature(logits, req.temperature, rng)
 }
 
-/// Autoregressive generation: forward → sample → append → decode.
+/// Autoregressive generation with KV cache: warm prompt → incremental forward → sample.
+///
+/// Before this sprint, each step called [`TinyModel::forward`] on the full sequence,
+/// recomputing attention over all prior tokens. Cached decoding appends one K/V row
+/// per token and reuses prior keys/values via [`TinyModel::forward_incremental`].
 pub fn generate(
     req: &GenerateRequest,
     tokenizer: &Tokenizer,
@@ -132,6 +137,13 @@ pub fn generate(
     }
 
     let mut sample_rng = StdRng::seed_from_u64(req.seed.unwrap_or(42));
+    let mut cache = KvCache::empty(model.config.d_model)?;
+    let mut last_logits = None;
+
+    // Warm the cache from the prompt (incremental forwards, same math as full forward).
+    for (position, &token_id) in tokens.iter().enumerate() {
+        last_logits = Some(model.forward_incremental(token_id, position, &mut cache)?);
+    }
 
     for _ in 0..req.max_new_tokens {
         if tokens.len() >= model.config.max_seq_len {
@@ -141,10 +153,19 @@ pub fn generate(
             );
         }
 
-        let logits = model.forward(&tokens)?;
-        let last_logits = logits.last_row()?;
-        let next_token = sample_next_token(&last_logits, req, &mut sample_rng)?;
+        let logits = last_logits
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing logits after prompt warm-up"))?;
+        let last_logits_vec = logits.last_row()?;
+        let next_token = sample_next_token(&last_logits_vec, req, &mut sample_rng)?;
         tokens.push(next_token);
+
+        let position = tokens.len() - 1;
+        last_logits = Some(model.forward_incremental(
+            next_token,
+            position,
+            &mut cache,
+        )?);
     }
 
     let generated_tokens = tokens[input_len..].to_vec();
@@ -277,6 +298,103 @@ mod tests {
         let out_b = generate(&req_b, &tok_b, &model_b).unwrap();
 
         assert_ne!(out_a.generated_tokens, out_b.generated_tokens);
+    }
+
+    /// Baseline loop: full-sequence forward each step (pre–KV-cache behavior).
+    fn generate_full_forward(
+        req: &GenerateRequest,
+        tokenizer: &Tokenizer,
+        model: &TinyModel,
+    ) -> anyhow::Result<GenerationResult> {
+        validate_request(req)?;
+
+        let mut tokens = tokenizer.encode(&req.prompt, false, false);
+        let input_len = tokens.len();
+
+        if tokens.is_empty() {
+            bail!("prompt produced no tokens");
+        }
+        if tokens.len() > model.config.max_seq_len {
+            bail!(
+                "prompt length {} exceeds max_seq_len {}",
+                tokens.len(),
+                model.config.max_seq_len
+            );
+        }
+
+        let mut sample_rng = StdRng::seed_from_u64(req.seed.unwrap_or(42));
+
+        for _ in 0..req.max_new_tokens {
+            if tokens.len() >= model.config.max_seq_len {
+                bail!(
+                    "sequence length reached max_seq_len ({}) during generation",
+                    model.config.max_seq_len
+                );
+            }
+
+            let logits = model.forward(&tokens)?;
+            let last_logits = logits.last_row()?;
+            let next_token = sample_next_token(&last_logits, req, &mut sample_rng)?;
+            tokens.push(next_token);
+        }
+
+        let generated_tokens = tokens[input_len..].to_vec();
+        let output_text = tokenizer.decode(&tokens, true)?;
+
+        Ok(GenerationResult {
+            input_tokens: tokens[..input_len].to_vec(),
+            all_tokens: tokens,
+            generated_tokens,
+            output_text,
+        })
+    }
+
+    #[test]
+    fn generation_with_cache_matches_full_forward() {
+        let req = sample_request();
+        let (tok, model) = test_setup(42);
+
+        let cached = generate(&req, &tok, &model).unwrap();
+        let baseline = generate_full_forward(&req, &tok, &model).unwrap();
+
+        assert_eq!(cached.generated_tokens, baseline.generated_tokens);
+        assert_eq!(cached.output_text, baseline.output_text);
+    }
+
+    #[test]
+    fn cache_grows_during_generation() {
+        let req = sample_request();
+        let (tok, model) = test_setup(42);
+        let input_len = tok.encode(&req.prompt, false, false).len();
+
+        let mut cache = KvCache::empty(model.config.d_model).unwrap();
+        let mut tokens = tok.encode(&req.prompt, false, false);
+        let mut sample_rng = StdRng::seed_from_u64(req.seed.unwrap_or(42));
+        let mut last_logits = None;
+
+        for (position, &token_id) in tokens.iter().enumerate() {
+            last_logits = Some(
+                model
+                    .forward_incremental(token_id, position, &mut cache)
+                    .unwrap(),
+            );
+        }
+        assert_eq!(cache.len(), input_len);
+
+        for _ in 0..req.max_new_tokens {
+            let logits = last_logits.as_ref().unwrap();
+            let last_logits_vec = logits.last_row().unwrap();
+            let next_token = sample_next_token(&last_logits_vec, &req, &mut sample_rng).unwrap();
+            tokens.push(next_token);
+            let position = tokens.len() - 1;
+            last_logits = Some(
+                model
+                    .forward_incremental(next_token, position, &mut cache)
+                    .unwrap(),
+            );
+        }
+
+        assert_eq!(cache.len(), input_len + req.max_new_tokens as usize);
     }
 
     #[test]
