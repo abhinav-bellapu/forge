@@ -4,7 +4,7 @@ A tiny Rust inference runtime for transformer language models.
 
 ## Current status
 
-Sprint 5 — self-attention
+Sprint 6 — minimal model forward pass
 
 ## Implemented
 
@@ -14,6 +14,10 @@ Sprint 5 — self-attention
   - Core: shapes, indexing, `add`, `matmul`, 1D `softmax`
   - Attention prep: `transpose_2d`, `scalar_mul`, `scalar_div`, `softmax_rows`, `row`
 - Self-attention: scaled dot-product (`Attention::scaled_dot_product`)
+- Minimal model:
+  - Token embeddings
+  - Positional embeddings
+  - Q/K/V projections and forward pass (`TinyModel::forward`)
 
 ## Quick start
 

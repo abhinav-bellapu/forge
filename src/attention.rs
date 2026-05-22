@@ -1,6 +1,5 @@
 //! Scaled dot-product self-attention.
 
-#![allow(dead_code)] // used by unit tests; model will wire this in Sprint 6+
 
 use crate::tensor::Tensor;
 use anyhow::bail;
