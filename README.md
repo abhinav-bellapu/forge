@@ -4,16 +4,17 @@ A tiny Rust inference runtime for transformer language models.
 
 ## Current status
 
-Sprint 10 — KV cache
+Sprint 11 — multi-head attention
 
 ## Implemented
 
 - Project skeleton and CLI (`forge generate`)
 - Character-level tokenizer (`vocab.json`, encode/decode)
-- Tensor engine, self-attention, minimal `TinyModel` forward pass
+- Tensor engine, causal self-attention, minimal `TinyModel` forward pass
 - Autoregressive decoding (greedy, temperature, top-k, seeded sampling)
 - JSON checkpoint save/load for model weights
 - KV-cached decoding and incremental generation (optimized autoregressive inference)
+- Multi-head causal attention and multi-head KV cache
 
 ## Quick start
 

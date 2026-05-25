@@ -1,6 +1,6 @@
 //! Minimal transformer-style forward pass (embeddings + attention + logits).
 
-use crate::attention::{Attention, KvCache};
+use crate::attention::{Attention, MultiHeadKvCache};
 use crate::tensor::Tensor;
 use anyhow::bail;
 use rand::{Rng, SeedableRng};
@@ -13,6 +13,7 @@ pub struct ModelConfig {
     pub vocab_size: usize,
     pub max_seq_len: usize,
     pub d_model: usize,
+    pub n_heads: usize,
 }
 
 impl ModelConfig {
@@ -22,7 +23,12 @@ impl ModelConfig {
             vocab_size,
             max_seq_len: 64,
             d_model: 16,
+            n_heads: 4,
         }
+    }
+
+    pub fn head_dim(&self) -> usize {
+        self.d_model / self.n_heads
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -35,11 +41,21 @@ impl ModelConfig {
         if self.d_model == 0 {
             bail!("d_model must be greater than 0");
         }
+        if self.n_heads == 0 {
+            bail!("n_heads must be greater than 0");
+        }
+        if self.d_model % self.n_heads != 0 {
+            bail!(
+                "d_model {} must be divisible by n_heads {}",
+                self.d_model,
+                self.n_heads
+            );
+        }
         Ok(())
     }
 }
 
-/// Tiny language model: embeddings, single-head attention, vocab logits.
+/// Tiny language model: embeddings, multi-head attention, vocab logits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TinyModel {
     pub config: ModelConfig,
@@ -138,15 +154,16 @@ impl TinyModel {
         let q = x.matmul(&self.w_q)?;
         let k = x.matmul(&self.w_k)?;
         let v = x.matmul(&self.w_v)?;
-        let context = Attention::scaled_dot_product(&q, &k, &v)?;
+        let context =
+            Attention::multi_head_causal(&q, &k, &v, self.config.n_heads)?;
         let logits = context.matmul(&self.w_o)?;
         Ok(logits)
     }
 
-    /// Incremental forward for one new token using a KV cache.
+    /// Incremental forward for one new token using a multi-head KV cache.
     ///
-    /// Embeds only the new token, appends its K/V rows to `cache`, runs cached
-    /// attention, and returns logits for that position.
+    /// Embeds only the new token, appends per-head K/V rows, runs cached
+    /// multi-head attention, and returns logits for that position.
     ///
     /// `position` must equal the cache length before append.
     ///
@@ -155,7 +172,7 @@ impl TinyModel {
         &self,
         token_id: usize,
         position: usize,
-        cache: &mut KvCache,
+        cache: &mut MultiHeadKvCache,
     ) -> anyhow::Result<Tensor> {
         if position != cache.len() {
             bail!(
@@ -169,13 +186,7 @@ impl TinyModel {
         let k = x.matmul(&self.w_k)?;
         let v = x.matmul(&self.w_v)?;
 
-        if cache.len() == 0 {
-            *cache = KvCache::new(k, v)?;
-        } else {
-            cache.append(&k, &v)?;
-        }
-
-        let context = Attention::scaled_dot_product_cached(&q, cache)?;
+        let context = Attention::multi_head_cached(&q, &k, &v, cache)?;
         let logits = context.matmul(&self.w_o)?;
         Ok(logits)
     }
@@ -239,13 +250,14 @@ fn random_tensor(rows: usize, cols: usize, rng: &mut StdRng) -> anyhow::Result<T
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::attention::KvCache;
+    use crate::attention::MultiHeadKvCache;
 
     fn test_config() -> ModelConfig {
         ModelConfig {
             vocab_size: 16,
             max_seq_len: 8,
             d_model: 4,
+            n_heads: 4,
         }
     }
 
@@ -270,6 +282,24 @@ mod tests {
         cfg = test_config();
         cfg.d_model = 0;
         assert!(cfg.validate().is_err());
+
+        cfg = test_config();
+        cfg.n_heads = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn config_rejects_d_model_not_divisible_by_n_heads() {
+        let mut cfg = test_config();
+        cfg.n_heads = 3;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("divisible"));
+    }
+
+    #[test]
+    fn head_dim_helper() {
+        let cfg = ModelConfig::for_vocab(16);
+        assert_eq!(cfg.head_dim(), 4);
     }
 
     #[test]
@@ -331,10 +361,13 @@ mod tests {
     #[test]
     fn incremental_forward_output_shape() {
         let model = TinyModel::new_random(test_config(), 7).unwrap();
-        let mut cache = KvCache::empty(4).unwrap();
+        let mut cache =
+            MultiHeadKvCache::empty(model.config.n_heads, model.config.head_dim())
+                .unwrap();
         let logits = model.forward_incremental(2, 0, &mut cache).unwrap();
         assert_eq!(logits.shape(), &[1, 16]);
         assert_eq!(cache.len(), 1);
+        assert_eq!(cache.heads.len(), 4);
     }
 
     #[test]
@@ -343,7 +376,9 @@ mod tests {
         let token_ids = [2usize, 5, 7];
 
         let full_logits = model.forward(&token_ids).unwrap();
-        let mut cache = KvCache::empty(4).unwrap();
+        let mut cache =
+            MultiHeadKvCache::empty(model.config.n_heads, model.config.head_dim())
+                .unwrap();
 
         for (pos, &tid) in token_ids.iter().enumerate() {
             let incremental = model.forward_incremental(tid, pos, &mut cache).unwrap();
@@ -365,7 +400,9 @@ mod tests {
     #[test]
     fn incremental_forward_rejects_invalid_position() {
         let model = TinyModel::new_random(test_config(), 1).unwrap();
-        let mut cache = KvCache::empty(4).unwrap();
+        let mut cache =
+            MultiHeadKvCache::empty(model.config.n_heads, model.config.head_dim())
+                .unwrap();
         let err = model.forward_incremental(1, 1, &mut cache).unwrap_err();
         assert!(err.to_string().contains("position"));
     }

@@ -1,4 +1,4 @@
-use crate::attention::KvCache;
+use crate::attention::MultiHeadKvCache;
 use crate::checkpoint::load_checkpoint;
 use crate::cli::GenerateArgs;
 use crate::model::{ModelConfig, TinyModel};
@@ -137,7 +137,8 @@ pub fn generate(
     }
 
     let mut sample_rng = StdRng::seed_from_u64(req.seed.unwrap_or(42));
-    let mut cache = KvCache::empty(model.config.d_model)?;
+    let mut cache =
+        MultiHeadKvCache::empty(model.config.n_heads, model.config.head_dim())?;
     let mut last_logits = None;
 
     // Warm the cache from the prompt (incremental forwards, same math as full forward).
@@ -367,7 +368,11 @@ mod tests {
         let (tok, model) = test_setup(42);
         let input_len = tok.encode(&req.prompt, false, false).len();
 
-        let mut cache = KvCache::empty(model.config.d_model).unwrap();
+        let mut cache = MultiHeadKvCache::empty(
+            model.config.n_heads,
+            model.config.head_dim(),
+        )
+        .unwrap();
         let mut tokens = tok.encode(&req.prompt, false, false);
         let mut sample_rng = StdRng::seed_from_u64(req.seed.unwrap_or(42));
         let mut last_logits = None;

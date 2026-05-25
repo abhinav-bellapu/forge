@@ -1,4 +1,4 @@
-//! Scaled dot-product self-attention and KV cache for incremental decoding.
+//! Scaled dot-product self-attention, multi-head attention, and KV caches.
 
 use crate::tensor::Tensor;
 use anyhow::bail;
@@ -64,6 +64,34 @@ impl KvCache {
             );
         }
         Ok(())
+    }
+}
+
+/// Per-head KV caches for incremental multi-head decoding.
+#[derive(Debug, Clone)]
+pub struct MultiHeadKvCache {
+    pub heads: Vec<KvCache>,
+}
+
+impl MultiHeadKvCache {
+    pub fn empty(n_heads: usize, head_dim: usize) -> anyhow::Result<Self> {
+        if n_heads == 0 {
+            bail!("n_heads must be greater than 0");
+        }
+        if head_dim == 0 {
+            bail!("head_dim must be greater than 0");
+        }
+
+        let mut heads = Vec::with_capacity(n_heads);
+        for _ in 0..n_heads {
+            heads.push(KvCache::empty(head_dim)?);
+        }
+        Ok(Self { heads })
+    }
+
+    /// Cached sequence length (same across all heads).
+    pub fn len(&self) -> usize {
+        self.heads.first().map(|c| c.len()).unwrap_or(0)
     }
 }
 
@@ -213,6 +241,109 @@ impl Attention {
 
         Ok(output)
     }
+
+    /// Multi-head causal attention over column slices of Q/K/V.
+    ///
+    /// - `q` / `k` / `v`: `[seq_len, d_model]`
+    /// - output: `[seq_len, d_model]` (head outputs concatenated along columns)
+    pub fn multi_head_causal(
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        n_heads: usize,
+    ) -> anyhow::Result<Tensor> {
+        if n_heads == 0 {
+            bail!("n_heads must be greater than 0");
+        }
+
+        if q.ndim() != 2 || k.ndim() != 2 || v.ndim() != 2 {
+            bail!("multi_head_causal requires 2D q/k/v tensors");
+        }
+
+        let d_model = q.shape()[1];
+        if d_model % n_heads != 0 {
+            bail!(
+                "d_model {d_model} must be divisible by n_heads {n_heads}"
+            );
+        }
+
+        if k.shape() != q.shape() || v.shape() != q.shape() {
+            bail!(
+                "q/k/v shape mismatch: {:?} vs {:?} vs {:?}",
+                q.shape(),
+                k.shape(),
+                v.shape()
+            );
+        }
+
+        let head_dim = d_model / n_heads;
+        let mut head_outputs = Vec::with_capacity(n_heads);
+
+        for h in 0..n_heads {
+            let start = h * head_dim;
+            let end = start + head_dim;
+            let q_h = q.slice_cols(start, end)?;
+            let k_h = k.slice_cols(start, end)?;
+            let v_h = v.slice_cols(start, end)?;
+            let out_h = Self::scaled_dot_product(&q_h, &k_h, &v_h)?;
+            head_outputs.push(out_h);
+        }
+
+        Tensor::concat_cols(&head_outputs)
+    }
+
+    /// Incremental multi-head attention for one new token.
+    ///
+    /// - `q_new` / `k_new` / `v_new`: `[1, d_model]`
+    /// - output: `[1, d_model]`
+    pub fn multi_head_cached(
+        q_new: &Tensor,
+        k_new: &Tensor,
+        v_new: &Tensor,
+        cache: &mut MultiHeadKvCache,
+    ) -> anyhow::Result<Tensor> {
+        let n_heads = cache.heads.len();
+        if n_heads == 0 {
+            bail!("multi-head cache has no heads");
+        }
+
+        if q_new.shape()[0] != 1 || k_new.shape()[0] != 1 || v_new.shape()[0] != 1 {
+            bail!("multi_head_cached expects one-row q/k/v tensors");
+        }
+
+        let d_model = q_new.shape()[1];
+        if d_model % n_heads != 0 {
+            bail!(
+                "d_model {d_model} must be divisible by n_heads {n_heads}"
+            );
+        }
+
+        if k_new.shape() != q_new.shape() || v_new.shape() != q_new.shape() {
+            bail!("q_new/k_new/v_new shape mismatch");
+        }
+
+        let head_dim = d_model / n_heads;
+        let mut head_outputs = Vec::with_capacity(n_heads);
+
+        for (h, head_cache) in cache.heads.iter_mut().enumerate() {
+            let start = h * head_dim;
+            let end = start + head_dim;
+            let q_h = q_new.slice_cols(start, end)?;
+            let k_h = k_new.slice_cols(start, end)?;
+            let v_h = v_new.slice_cols(start, end)?;
+
+            if head_cache.len() == 0 {
+                *head_cache = KvCache::new(k_h, v_h)?;
+            } else {
+                head_cache.append(&k_h, &v_h)?;
+            }
+
+            let out_h = Self::scaled_dot_product_cached(&q_h, head_cache)?;
+            head_outputs.push(out_h);
+        }
+
+        Tensor::concat_cols(&head_outputs)
+    }
 }
 
 #[cfg(test)]
@@ -348,6 +479,85 @@ mod tests {
 
         let out = Attention::scaled_dot_product_cached(&q_new, &cache).unwrap();
         assert_eq!(out.shape(), &[1, 2]);
+    }
+
+    #[test]
+    fn multi_head_causal_output_shape() {
+        let q = Tensor::new(vec![1.0; 8], vec![2, 4]).unwrap();
+        let k = q.clone();
+        let v = q.clone();
+
+        let out = Attention::multi_head_causal(&q, &k, &v, 2).unwrap();
+        assert_eq!(out.shape(), &[2, 4]);
+    }
+
+    #[test]
+    fn multi_head_causal_rejects_invalid_n_heads() {
+        let q = Tensor::new(vec![1.0; 8], vec![2, 4]).unwrap();
+        let k = q.clone();
+        let v = q.clone();
+
+        assert!(Attention::multi_head_causal(&q, &k, &v, 0).is_err());
+        assert!(Attention::multi_head_causal(&q, &k, &v, 3).is_err());
+    }
+
+    #[test]
+    fn multi_head_causal_with_one_head_matches_scaled_dot_product() {
+        let q = Tensor::new(vec![1.0, 0.0, 0.0, 1.0], vec![2, 2]).unwrap();
+        let k = q.clone();
+        let v = Tensor::new(vec![10.0, 0.0, 0.0, 1.0], vec![2, 2]).unwrap();
+
+        let single = Attention::scaled_dot_product(&q, &k, &v).unwrap();
+        let multi = Attention::multi_head_causal(&q, &k, &v, 1).unwrap();
+
+        assert_eq!(single.shape(), multi.shape());
+        for r in 0..single.shape()[0] {
+            for c in 0..single.shape()[1] {
+                assert!(
+                    (single.get2d(r, c).unwrap() - multi.get2d(r, c).unwrap()).abs()
+                        < 1e-5
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn multi_head_kv_cache_initializes_heads() {
+        let cache = MultiHeadKvCache::empty(4, 2).unwrap();
+        assert_eq!(cache.heads.len(), 4);
+        assert_eq!(cache.len(), 0);
+        for head in &cache.heads {
+            assert_eq!(head.keys.shape(), &[0, 2]);
+        }
+    }
+
+    #[test]
+    fn multi_head_cached_output_shape() {
+        let q = Tensor::new(vec![1.0, 0.0, 0.0, 1.0], vec![1, 4]).unwrap();
+        let k = q.clone();
+        let v = q.clone();
+        let mut cache = MultiHeadKvCache::empty(2, 2).unwrap();
+
+        let out = Attention::multi_head_cached(&q, &k, &v, &mut cache).unwrap();
+        assert_eq!(out.shape(), &[1, 4]);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn multi_head_cached_grows_cache_length() {
+        let q1 = Tensor::new(vec![1.0, 0.0], vec![1, 2]).unwrap();
+        let k1 = q1.clone();
+        let v1 = q1.clone();
+        let mut cache = MultiHeadKvCache::empty(2, 1).unwrap();
+
+        Attention::multi_head_cached(&q1, &k1, &v1, &mut cache).unwrap();
+        assert_eq!(cache.len(), 1);
+
+        let q2 = Tensor::new(vec![0.0, 1.0], vec![1, 2]).unwrap();
+        let k2 = q2.clone();
+        let v2 = q2.clone();
+        Attention::multi_head_cached(&q2, &k2, &v2, &mut cache).unwrap();
+        assert_eq!(cache.len(), 2);
     }
 
     #[test]

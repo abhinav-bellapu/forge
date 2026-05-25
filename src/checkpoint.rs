@@ -86,6 +86,7 @@ mod tests {
             vocab_size: 16,
             max_seq_len: 8,
             d_model: 4,
+            n_heads: 4,
         };
         TinyModel::new_random(config, 42).unwrap()
     }

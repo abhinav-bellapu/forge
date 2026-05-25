@@ -297,6 +297,72 @@ impl Tensor {
         Tensor::new(data, vec![rows_a + rows_b, cols_a])
     }
 
+    /// Slice column range from a 2D tensor: `[rows, cols]` → `[rows, end_col - start_col]`.
+    pub fn slice_cols(
+        &self,
+        start_col: usize,
+        end_col: usize,
+    ) -> anyhow::Result<Tensor> {
+        if self.ndim() != 2 {
+            bail!("slice_cols requires 2D tensor, got {}D", self.ndim());
+        }
+        if end_col <= start_col {
+            bail!("slice_cols requires end_col > start_col");
+        }
+
+        let rows = self.shape[0];
+        let cols = self.shape[1];
+        if end_col > cols {
+            bail!(
+                "slice_cols end_col {end_col} out of bounds for {cols} columns"
+            );
+        }
+
+        let out_cols = end_col - start_col;
+        let mut data = Vec::with_capacity(rows * out_cols);
+        for r in 0..rows {
+            for c in start_col..end_col {
+                data.push(self.data[r * cols + c]);
+            }
+        }
+
+        Tensor::new(data, vec![rows, out_cols])
+    }
+
+    /// Concatenate 2D tensors along columns: `[rows, a] + [rows, b] + ... -> [rows, sum]`.
+    pub fn concat_cols(tensors: &[Tensor]) -> anyhow::Result<Tensor> {
+        if tensors.is_empty() {
+            bail!("concat_cols requires at least one tensor");
+        }
+
+        let rows = tensors[0].shape()[0];
+        let mut total_cols = 0;
+
+        for (i, t) in tensors.iter().enumerate() {
+            if t.ndim() != 2 {
+                bail!("concat_cols tensor {i} must be 2D, got {}D", t.ndim());
+            }
+            if t.shape()[0] != rows {
+                bail!(
+                    "concat_cols row mismatch at tensor {i}: {} vs {rows}",
+                    t.shape()[0]
+                );
+            }
+            total_cols += t.shape()[1];
+        }
+
+        let mut data = Vec::with_capacity(rows * total_cols);
+        for r in 0..rows {
+            for t in tensors {
+                let cols = t.shape()[1];
+                let start = r * cols;
+                data.extend_from_slice(&t.data[start..start + cols]);
+            }
+        }
+
+        Tensor::new(data, vec![rows, total_cols])
+    }
+
     /// Apply softmax independently to each row of a 2D tensor.
     pub fn softmax_rows(&self) -> anyhow::Result<Tensor> {
         if self.ndim() != 2 {
@@ -531,6 +597,49 @@ mod tests {
     fn last_row_rejects_non_2d() {
         let t = Tensor::new(vec![1.0, 2.0], vec![2]).unwrap();
         assert!(t.last_row().is_err());
+    }
+
+    #[test]
+    fn slice_cols_correctness() {
+        let t = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
+        let s = t.slice_cols(1, 3).unwrap();
+        assert_eq!(s.shape(), &[2, 2]);
+        assert_eq!(s.get2d(0, 0).unwrap(), 2.0);
+        assert_eq!(s.get2d(0, 1).unwrap(), 3.0);
+        assert_eq!(s.get2d(1, 0).unwrap(), 5.0);
+        assert_eq!(s.get2d(1, 1).unwrap(), 6.0);
+    }
+
+    #[test]
+    fn slice_cols_rejects_bad_bounds() {
+        let t = Tensor::new(vec![1.0; 6], vec![2, 3]).unwrap();
+        assert!(t.slice_cols(2, 2).is_err());
+        assert!(t.slice_cols(0, 4).is_err());
+        let one_d = Tensor::new(vec![1.0, 2.0], vec![2]).unwrap();
+        assert!(one_d.slice_cols(0, 1).is_err());
+    }
+
+    #[test]
+    fn concat_cols_correctness() {
+        let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]).unwrap();
+        let b = Tensor::new(vec![5.0, 6.0, 7.0, 8.0], vec![2, 2]).unwrap();
+        let c = Tensor::concat_cols(&[a, b]).unwrap();
+        assert_eq!(c.shape(), &[2, 4]);
+        assert_eq!(c.get2d(0, 0).unwrap(), 1.0);
+        assert_eq!(c.get2d(0, 2).unwrap(), 5.0);
+        assert_eq!(c.get2d(1, 3).unwrap(), 8.0);
+    }
+
+    #[test]
+    fn concat_cols_rejects_mismatched_rows() {
+        let a = Tensor::new(vec![1.0; 4], vec![2, 2]).unwrap();
+        let b = Tensor::new(vec![1.0; 2], vec![1, 2]).unwrap();
+        assert!(Tensor::concat_cols(&[a, b]).is_err());
+    }
+
+    #[test]
+    fn concat_cols_rejects_empty_input() {
+        assert!(Tensor::concat_cols(&[]).is_err());
     }
 
     #[test]
