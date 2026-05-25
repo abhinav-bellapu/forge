@@ -133,6 +133,137 @@ impl Tensor {
         Self::new(data, self.shape.clone())
     }
 
+    /// Elementwise add `other` into `self`; shapes must match exactly.
+    pub fn add_inplace(&mut self, other: &Tensor) -> anyhow::Result<()> {
+        if self.shape != other.shape {
+            bail!(
+                "shape mismatch: {:?} vs {:?}",
+                self.shape,
+                other.shape
+            );
+        }
+        for i in 0..self.data.len() {
+            self.data[i] += other.data[i];
+        }
+        Ok(())
+    }
+
+    /// Elementwise multiply; shapes must match exactly.
+    pub fn mul(&self, other: &Tensor) -> anyhow::Result<Tensor> {
+        if self.shape != other.shape {
+            bail!(
+                "shape mismatch: {:?} vs {:?}",
+                self.shape,
+                other.shape
+            );
+        }
+        let data: Vec<f32> = self
+            .data
+            .iter()
+            .zip(other.data.iter())
+            .map(|(a, b)| a * b)
+            .collect();
+        Self::new(data, self.shape.clone())
+    }
+
+    /// Add a `[1, cols]` row broadcast across all rows of a `[rows, cols]` tensor.
+    pub fn add_broadcast_row(&self, row: &Tensor) -> anyhow::Result<Tensor> {
+        if self.ndim() != 2 {
+            bail!("add_broadcast_row requires 2D self tensor, got {}D", self.ndim());
+        }
+        if row.ndim() != 2 {
+            bail!("add_broadcast_row requires 2D row tensor, got {}D", row.ndim());
+        }
+
+        let rows = self.shape[0];
+        let cols = self.shape[1];
+        if row.shape() != &[1, cols] {
+            bail!(
+                "row shape must be [1, {cols}], got {:?}",
+                row.shape()
+            );
+        }
+
+        let mut data = Vec::with_capacity(rows * cols);
+        for r in 0..rows {
+            for c in 0..cols {
+                data.push(self.data[r * cols + c] + row.data[c]);
+            }
+        }
+
+        Self::new(data, vec![rows, cols])
+    }
+
+    /// Mean across columns for each row: `[rows, cols]` → `[rows, 1]`.
+    pub fn mean_last_dim(&self) -> anyhow::Result<Tensor> {
+        if self.ndim() != 2 {
+            bail!("mean_last_dim requires 2D tensor, got {}D", self.ndim());
+        }
+
+        let rows = self.shape[0];
+        let cols = self.shape[1];
+        let mut data = Vec::with_capacity(rows);
+
+        for r in 0..rows {
+            let mut sum = 0.0f32;
+            for c in 0..cols {
+                sum += self.data[r * cols + c];
+            }
+            data.push(sum / cols as f32);
+        }
+
+        Self::new(data, vec![rows, 1])
+    }
+
+    /// Variance across columns for each row: `[rows, cols]` → `[rows, 1]`.
+    pub fn variance_last_dim(&self) -> anyhow::Result<Tensor> {
+        if self.ndim() != 2 {
+            bail!("variance_last_dim requires 2D tensor, got {}D", self.ndim());
+        }
+
+        let mean = self.mean_last_dim()?;
+        let rows = self.shape[0];
+        let cols = self.shape[1];
+        let mut data = Vec::with_capacity(rows);
+
+        for r in 0..rows {
+            let m = mean.get2d(r, 0)?;
+            let mut var_sum = 0.0f32;
+            for c in 0..cols {
+                let diff = self.data[r * cols + c] - m;
+                var_sum += diff * diff;
+            }
+            data.push(var_sum / cols as f32);
+        }
+
+        Self::new(data, vec![rows, 1])
+    }
+
+    /// Per-row normalization: `(x - mean) / sqrt(var + epsilon)`.
+    pub fn normalize_last_dim(&self, epsilon: f32) -> anyhow::Result<Tensor> {
+        if self.ndim() != 2 {
+            bail!("normalize_last_dim requires 2D tensor, got {}D", self.ndim());
+        }
+
+        let mean = self.mean_last_dim()?;
+        let var = self.variance_last_dim()?;
+        let rows = self.shape[0];
+        let cols = self.shape[1];
+        let mut data = Vec::with_capacity(rows * cols);
+
+        for r in 0..rows {
+            let m = mean.get2d(r, 0)?;
+            let v = var.get2d(r, 0)?;
+            let denom = (v + epsilon).sqrt();
+            for c in 0..cols {
+                let x = self.data[r * cols + c];
+                data.push((x - m) / denom);
+            }
+        }
+
+        Self::new(data, self.shape.clone())
+    }
+
     /// Matrix multiply for 2D tensors: `[m, k] x [k, n] -> [m, n]`.
     pub fn matmul(&self, other: &Tensor) -> anyhow::Result<Tensor> {
         if self.ndim() != 2 {
@@ -451,6 +582,68 @@ mod tests {
         t.set2d(1, 1, 99.0).unwrap();
         assert_eq!(t.get2d(1, 1).unwrap(), 99.0);
         assert_eq!(t.get2d(0, 0).unwrap(), 1.0);
+    }
+
+    #[test]
+    fn add_inplace_correctness() {
+        let mut a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]).unwrap();
+        let b = Tensor::new(vec![10.0, 20.0, 30.0, 40.0], vec![2, 2]).unwrap();
+        a.add_inplace(&b).unwrap();
+        assert_eq!(a.data, vec![11.0, 22.0, 33.0, 44.0]);
+    }
+
+    #[test]
+    fn mul_correctness() {
+        let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]).unwrap();
+        let b = Tensor::new(vec![2.0, 3.0, 4.0, 5.0], vec![2, 2]).unwrap();
+        let c = a.mul(&b).unwrap();
+        assert_eq!(c.data, vec![2.0, 6.0, 12.0, 20.0]);
+    }
+
+    #[test]
+    fn add_broadcast_row_correctness() {
+        let t = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]).unwrap();
+        let row = Tensor::new(vec![10.0, 20.0], vec![1, 2]).unwrap();
+        let out = t.add_broadcast_row(&row).unwrap();
+        assert_eq!(out.get2d(0, 0).unwrap(), 11.0);
+        assert_eq!(out.get2d(1, 1).unwrap(), 24.0);
+    }
+
+    #[test]
+    fn mean_last_dim_correctness() {
+        let t = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
+        let m = t.mean_last_dim().unwrap();
+        assert_eq!(m.shape(), &[2, 1]);
+        assert_eq!(m.get2d(0, 0).unwrap(), 2.0);
+        assert_eq!(m.get2d(1, 0).unwrap(), 5.0);
+    }
+
+    #[test]
+    fn variance_last_dim_correctness() {
+        let t = Tensor::new(vec![1.0, 2.0, 3.0], vec![1, 3]).unwrap();
+        let v = t.variance_last_dim().unwrap();
+        assert_eq!(v.shape(), &[1, 1]);
+        assert!((v.get2d(0, 0).unwrap() - 2.0 / 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn normalize_last_dim_near_zero_mean() {
+        let t = Tensor::new(vec![1.0, 2.0, 3.0, 10.0, 20.0, 30.0], vec![2, 3]).unwrap();
+        let n = t.normalize_last_dim(1e-5).unwrap();
+        let m = n.mean_last_dim().unwrap();
+        for r in 0..2 {
+            assert!(m.get2d(r, 0).unwrap().abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn normalize_last_dim_near_unit_variance() {
+        let t = Tensor::new(vec![1.0, 2.0, 3.0, 10.0, 20.0, 30.0], vec![2, 3]).unwrap();
+        let n = t.normalize_last_dim(1e-5).unwrap();
+        let v = n.variance_last_dim().unwrap();
+        for r in 0..2 {
+            assert!((v.get2d(r, 0).unwrap() - 1.0).abs() < 1e-4);
+        }
     }
 
     #[test]

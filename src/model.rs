@@ -1,4 +1,4 @@
-//! Minimal transformer-style forward pass (embeddings + attention + logits).
+//! Minimal transformer-style forward pass (embeddings + attention + norm + logits).
 
 use crate::attention::{Attention, MultiHeadKvCache};
 use crate::tensor::Tensor;
@@ -55,7 +55,62 @@ impl ModelConfig {
     }
 }
 
-/// Tiny language model: embeddings, multi-head attention, vocab logits.
+/// Per-token layer normalization (`gamma`, `beta` shape `[1, d_model]`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerNorm {
+    pub gamma: Tensor,
+    pub beta: Tensor,
+    pub epsilon: f32,
+}
+
+impl LayerNorm {
+    pub fn new(d_model: usize) -> anyhow::Result<Self> {
+        if d_model == 0 {
+            bail!("d_model must be greater than 0");
+        }
+
+        let gamma = Tensor::new(vec![1.0; d_model], vec![1, d_model])?;
+        let beta = Tensor::zeros(vec![1, d_model])?;
+
+        Ok(Self {
+            gamma,
+            beta,
+            epsilon: 1e-5,
+        })
+    }
+
+    /// Normalize each row, then apply affine transform `normalized * gamma + beta`.
+    pub fn forward(&self, x: &Tensor) -> anyhow::Result<Tensor> {
+        if x.ndim() != 2 {
+            bail!("layer norm expects 2D input, got {}D", x.ndim());
+        }
+        if x.shape()[1] != self.gamma.shape()[1] {
+            bail!(
+                "layer norm feature mismatch: {} vs {}",
+                x.shape()[1],
+                self.gamma.shape()[1]
+            );
+        }
+
+        let normalized = x.normalize_last_dim(self.epsilon)?;
+        let rows = normalized.shape()[0];
+        let cols = normalized.shape()[1];
+        let mut data = Vec::with_capacity(rows * cols);
+
+        for r in 0..rows {
+            for c in 0..cols {
+                let n = normalized.get2d(r, c)?;
+                let g = self.gamma.get2d(0, c)?;
+                data.push(n * g);
+            }
+        }
+
+        let scaled = Tensor::new(data, normalized.shape().to_vec())?;
+        scaled.add_broadcast_row(&self.beta)
+    }
+}
+
+/// Tiny language model: embeddings, multi-head attention, residual + norm, logits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TinyModel {
     pub config: ModelConfig,
@@ -71,6 +126,8 @@ pub struct TinyModel {
     pub w_k: Tensor,
     /// `[d_model, d_model]`
     pub w_v: Tensor,
+
+    pub attn_norm: LayerNorm,
 
     /// `[d_model, vocab_size]`
     pub w_o: Tensor,
@@ -94,8 +151,34 @@ impl TinyModel {
             w_q: random_tensor(d_model, d_model, &mut rng)?,
             w_k: random_tensor(d_model, d_model, &mut rng)?,
             w_v: random_tensor(d_model, d_model, &mut rng)?,
+            attn_norm: LayerNorm::new(d_model)?,
             w_o: random_tensor(d_model, vocab_size, &mut rng)?,
         })
+    }
+
+    /// Attention sub-block: multi-head causal attention, residual add, layer norm.
+    fn attention_block(&self, x: &Tensor) -> anyhow::Result<Tensor> {
+        let q = x.matmul(&self.w_q)?;
+        let k = x.matmul(&self.w_k)?;
+        let v = x.matmul(&self.w_v)?;
+        let attention_output =
+            Attention::multi_head_causal(&q, &k, &v, self.config.n_heads)?;
+        let residual = x.add(&attention_output)?;
+        self.attn_norm.forward(&residual)
+    }
+
+    /// Cached attention sub-block for one new token row.
+    fn attention_block_cached(
+        &self,
+        x: &Tensor,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        cache: &mut MultiHeadKvCache,
+    ) -> anyhow::Result<Tensor> {
+        let attention_output = Attention::multi_head_cached(q, k, v, cache)?;
+        let residual = x.add(&attention_output)?;
+        self.attn_norm.forward(&residual)
     }
 
     /// Embed token IDs with learned token and positional vectors.
@@ -144,19 +227,15 @@ impl TinyModel {
         Tensor::new(data, vec![1, d_model])
     }
 
-    /// Full forward pass: embeddings → causal Q/K/V attention → logits.
+    /// Full forward pass: embeddings → attention block (residual + norm) → logits.
     ///
     /// Recomputes attention over the entire sequence each call (no KV cache).
     /// Uses causal masking so logits match incremental KV-cache decoding.
     /// Output shape: `[seq_len, vocab_size]`.
     pub fn forward(&self, token_ids: &[usize]) -> anyhow::Result<Tensor> {
         let x = self.embed_tokens(token_ids)?;
-        let q = x.matmul(&self.w_q)?;
-        let k = x.matmul(&self.w_k)?;
-        let v = x.matmul(&self.w_v)?;
-        let context =
-            Attention::multi_head_causal(&q, &k, &v, self.config.n_heads)?;
-        let logits = context.matmul(&self.w_o)?;
+        let normalized = self.attention_block(&x)?;
+        let logits = normalized.matmul(&self.w_o)?;
         Ok(logits)
     }
 
@@ -186,8 +265,8 @@ impl TinyModel {
         let k = x.matmul(&self.w_k)?;
         let v = x.matmul(&self.w_v)?;
 
-        let context = Attention::multi_head_cached(&q, &k, &v, cache)?;
-        let logits = context.matmul(&self.w_o)?;
+        let normalized = self.attention_block_cached(&x, &q, &k, &v, cache)?;
+        let logits = normalized.matmul(&self.w_o)?;
         Ok(logits)
     }
 
@@ -205,6 +284,8 @@ impl TinyModel {
         expect_shape(&self.w_k, &[dm, dm], "w_k")?;
         expect_shape(&self.w_v, &[dm, dm], "w_v")?;
         expect_shape(&self.w_o, &[dm, vs], "w_o")?;
+        expect_shape(&self.attn_norm.gamma, &[1, dm], "attn_norm.gamma")?;
+        expect_shape(&self.attn_norm.beta, &[1, dm], "attn_norm.beta")?;
 
         Ok(())
     }
@@ -413,5 +494,72 @@ mod tests {
         model.w_o = Tensor::new(vec![0.0; 4], vec![2, 2]).unwrap();
         let err = model.validate_shapes().unwrap_err();
         assert!(err.to_string().contains("w_o"));
+    }
+
+    #[test]
+    fn layer_norm_output_shape() {
+        let ln = LayerNorm::new(4).unwrap();
+        let x = Tensor::new(vec![1.0; 8], vec![2, 4]).unwrap();
+        let out = ln.forward(&x).unwrap();
+        assert_eq!(out.shape(), &[2, 4]);
+    }
+
+    #[test]
+    fn layer_norm_normalized_rows_near_zero_mean() {
+        let ln = LayerNorm::new(3).unwrap();
+        let x = Tensor::new(vec![1.0, 4.0, 9.0, 2.0, 8.0, 18.0], vec![2, 3]).unwrap();
+        let out = ln.forward(&x).unwrap();
+        let m = out.mean_last_dim().unwrap();
+        for r in 0..2 {
+            assert!(m.get2d(r, 0).unwrap().abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn layer_norm_gamma_beta_application() {
+        let mut ln = LayerNorm::new(2).unwrap();
+        ln.gamma = Tensor::new(vec![2.0, 3.0], vec![1, 2]).unwrap();
+        ln.beta = Tensor::new(vec![1.0, -1.0], vec![1, 2]).unwrap();
+        let x = Tensor::new(vec![0.0, 0.0], vec![1, 2]).unwrap();
+        let out = ln.forward(&x).unwrap();
+        assert_eq!(out.get2d(0, 0).unwrap(), 1.0);
+        assert_eq!(out.get2d(0, 1).unwrap(), -1.0);
+    }
+
+    #[test]
+    fn residual_connection_changes_output() {
+        let model = TinyModel::new_random(test_config(), 5).unwrap();
+        let token_ids = [1usize, 2];
+
+        let logits_with_residual = model.forward(&token_ids).unwrap();
+
+        let x = model.embed_tokens(&token_ids).unwrap();
+        let q = x.matmul(&model.w_q).unwrap();
+        let k = x.matmul(&model.w_k).unwrap();
+        let v = x.matmul(&model.w_v).unwrap();
+        let attention_only =
+            Attention::multi_head_causal(&q, &k, &v, model.config.n_heads).unwrap();
+        let normalized = model.attn_norm.forward(&attention_only).unwrap();
+        let logits_no_residual = normalized.matmul(&model.w_o).unwrap();
+
+        assert_ne!(logits_with_residual.data, logits_no_residual.data);
+    }
+
+    #[test]
+    fn checkpoint_preserves_layer_norm_params() {
+        let model = TinyModel::new_random(test_config(), 99).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "forge_ln_checkpoint_{}.json",
+            std::process::id()
+        ));
+
+        crate::checkpoint::save_checkpoint(&model, &path).unwrap();
+        let loaded = crate::checkpoint::load_checkpoint(&path).unwrap();
+
+        assert_eq!(model.attn_norm.gamma.data, loaded.attn_norm.gamma.data);
+        assert_eq!(model.attn_norm.beta.data, loaded.attn_norm.beta.data);
+        assert_eq!(model.attn_norm.epsilon, loaded.attn_norm.epsilon);
+
+        let _ = std::fs::remove_file(path);
     }
 }

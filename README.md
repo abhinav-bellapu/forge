@@ -4,7 +4,7 @@ A tiny Rust inference runtime for transformer language models.
 
 ## Current status
 
-Sprint 11 — multi-head attention
+Sprint 12 — layer norm + residual connections
 
 ## Implemented
 
@@ -15,6 +15,7 @@ Sprint 11 — multi-head attention
 - JSON checkpoint save/load for model weights
 - KV-cached decoding and incremental generation (optimized autoregressive inference)
 - Multi-head causal attention and multi-head KV cache
+- Transformer residual pathways and layer normalization
 
 ## Quick start
 

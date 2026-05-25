@@ -110,6 +110,8 @@ mod tests {
         assert_eq!(model.token_embeddings.data, loaded.token_embeddings.data);
         assert_eq!(model.w_q.data, loaded.w_q.data);
         assert_eq!(model.w_o.data, loaded.w_o.data);
+        assert_eq!(model.attn_norm.gamma.data, loaded.attn_norm.gamma.data);
+        assert_eq!(model.attn_norm.beta.data, loaded.attn_norm.beta.data);
 
         let _ = std::fs::remove_file(path);
     }
