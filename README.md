@@ -4,7 +4,7 @@ A tiny Rust inference runtime for transformer language models.
 
 ## Current status
 
-Sprint 17 — hidden-state gradient flow into embeddings
+Sprint 18 — gradient checking and training hardening
 
 ## Implemented
 
@@ -26,6 +26,15 @@ Sprint 17 — hidden-state gradient flow into embeddings
 - Cross-entropy loss and local text dataset loader
 - Educational output-layer training (embeddings + `w_o`)
 - Hidden-state gradients into prefix token embeddings
+- Finite-difference gradient checking for trained parameters
+
+## Gradient checking
+
+Forge compares **analytic gradients** (hand-derived backprop through the output layer and
+embedding inputs) against **numerical gradients** (central finite differences on tiny
+deterministic models). This validates the training update path before adding deeper
+backprop through transformer layers. Transformer attention, FFN, and LayerNorm weights
+remain frozen during training.
 
 ## Quick start
 
