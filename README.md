@@ -4,7 +4,7 @@ A tiny Rust inference runtime for transformer language models.
 
 ## Current status
 
-Sprint 18 — gradient checking and training hardening
+Sprint 19 — inference benchmark suite
 
 ## Implemented
 
@@ -27,6 +27,7 @@ Sprint 18 — gradient checking and training hardening
 - Educational output-layer training (embeddings + `w_o`)
 - Hidden-state gradients into prefix token embeddings
 - Finite-difference gradient checking for trained parameters
+- Local inference benchmarking (`forge bench`, no network or file output by default)
 
 ## Gradient checking
 
@@ -63,6 +64,20 @@ Generate using saved weights:
 
 ```bash
 cargo run -- generate --prompt "hello" --checkpoint model.json --temperature 0 --seed 42
+```
+
+### Benchmarking (local timing only)
+
+Measure generation throughput with repeated runs (stdout only, no files written):
+
+```bash
+cargo run -- bench --prompt "hello" --max-new-tokens 20 --runs 5 --seed 42
+```
+
+Optional checkpoint:
+
+```bash
+cargo run -- bench --prompt "hello" --max-new-tokens 20 --runs 5 --seed 42 --checkpoint model.json
 ```
 
 ### Training (local text only)

@@ -1,4 +1,5 @@
 mod attention;
+mod benchmark;
 mod checkpoint;
 mod cli;
 mod generation;
@@ -18,5 +19,6 @@ fn main() -> Result<()> {
             checkpoint::run_save_random_checkpoint(&args.output, args.seed)
         }
         Command::Train(args) => training::run_train(&args),
+        Command::Bench(args) => benchmark::run_bench(&args),
     }
 }

@@ -17,6 +17,8 @@ pub enum Command {
     SaveRandomCheckpoint(SaveRandomCheckpointArgs),
     /// Train on a local text file and save a checkpoint.
     Train(TrainArgs),
+    /// Benchmark generation throughput (local timing only).
+    Bench(BenchArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -84,6 +86,29 @@ pub struct TrainArgs {
     pub seed: u64,
 
     /// Optional starting checkpoint (otherwise random init).
+    #[arg(long)]
+    pub checkpoint: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct BenchArgs {
+    /// Input prompt text.
+    #[arg(long)]
+    pub prompt: String,
+
+    /// Maximum number of new tokens to generate per run.
+    #[arg(long, default_value_t = 20)]
+    pub max_new_tokens: u32,
+
+    /// Number of timed generation runs.
+    #[arg(long, default_value_t = 5)]
+    pub runs: u32,
+
+    /// Seed for model initialization and generation.
+    #[arg(long, default_value_t = 42)]
+    pub seed: u64,
+
+    /// Load model weights from a JSON checkpoint instead of random init.
     #[arg(long)]
     pub checkpoint: Option<PathBuf>,
 }
