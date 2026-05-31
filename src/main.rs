@@ -6,6 +6,7 @@ mod model;
 mod sampling;
 mod tensor;
 mod tokenizer;
+mod training;
 
 use anyhow::Result;
 use cli::Command;
@@ -16,5 +17,6 @@ fn main() -> Result<()> {
         Command::SaveRandomCheckpoint(args) => {
             checkpoint::run_save_random_checkpoint(&args.output, args.seed)
         }
+        Command::Train(args) => training::run_train(&args),
     }
 }

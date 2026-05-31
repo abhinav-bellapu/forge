@@ -337,17 +337,25 @@ impl TinyModel {
         Tensor::new(data, vec![1, d_model])
     }
 
+    /// Hidden states after all transformer layers (before logits projection).
+    ///
+    /// Output shape: `[seq_len, d_model]`.
+    pub fn forward_hidden(&self, token_ids: &[usize]) -> anyhow::Result<Tensor> {
+        let mut x = self.embed_tokens(token_ids)?;
+        for layer in &self.layers {
+            x = layer.forward(&x, self.config.n_heads)?;
+        }
+        Ok(x)
+    }
+
     /// Full forward pass: embeddings → stacked layers → logits.
     ///
     /// Recomputes attention over the entire sequence each call (no KV cache).
     /// Uses causal masking so logits match incremental KV-cache decoding.
     /// Output shape: `[seq_len, vocab_size]`.
     pub fn forward(&self, token_ids: &[usize]) -> anyhow::Result<Tensor> {
-        let mut x = self.embed_tokens(token_ids)?;
-        for layer in &self.layers {
-            x = layer.forward(&x, self.config.n_heads)?;
-        }
-        self.project_logits(&x)
+        let hidden = self.forward_hidden(token_ids)?;
+        self.project_logits(&hidden)
     }
 
     /// Incremental forward for one new token using per-layer KV caches.

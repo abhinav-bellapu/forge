@@ -15,6 +15,8 @@ pub enum Command {
     Generate(GenerateArgs),
     /// Save a randomly initialized model checkpoint to JSON.
     SaveRandomCheckpoint(SaveRandomCheckpointArgs),
+    /// Train on a local text file and save a checkpoint.
+    Train(TrainArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -53,6 +55,37 @@ pub struct SaveRandomCheckpointArgs {
     /// Seed for random weight initialization.
     #[arg(long, default_value_t = 42)]
     pub seed: u64,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct TrainArgs {
+    /// Local UTF-8 training text file.
+    #[arg(long)]
+    pub input: PathBuf,
+
+    /// Number of training epochs.
+    #[arg(long, default_value_t = 5)]
+    pub epochs: usize,
+
+    /// SGD learning rate for output-layer updates.
+    #[arg(long, default_value_t = 0.01)]
+    pub learning_rate: f32,
+
+    /// Output checkpoint JSON path.
+    #[arg(long)]
+    pub output: PathBuf,
+
+    /// Examples per batch.
+    #[arg(long, default_value_t = 8)]
+    pub batch_size: usize,
+
+    /// RNG seed for reproducible training.
+    #[arg(long, default_value_t = 42)]
+    pub seed: u64,
+
+    /// Optional starting checkpoint (otherwise random init).
+    #[arg(long)]
+    pub checkpoint: Option<PathBuf>,
 }
 
 pub fn parse() -> anyhow::Result<Command> {
