@@ -4,7 +4,7 @@ A tiny Rust inference runtime for transformer language models.
 
 ## Current status
 
-Sprint 16 — minimal local training loop
+Sprint 17 — hidden-state gradient flow into embeddings
 
 ## Implemented
 
@@ -25,6 +25,7 @@ Sprint 16 — minimal local training loop
 - Optional tied input/output embeddings (`tie_embeddings`)
 - Cross-entropy loss and local text dataset loader
 - Educational output-layer training (embeddings + `w_o`)
+- Hidden-state gradients into prefix token embeddings
 
 ## Quick start
 

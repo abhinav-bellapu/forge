@@ -1,4 +1,4 @@
-//! Minimal local training loop (output-layer gradients only, no full backprop).
+//! Minimal local training loop with output-layer and embedding-input gradients.
 
 use crate::checkpoint::{load_checkpoint, save_checkpoint};
 use crate::cli::TrainArgs;
@@ -128,14 +128,61 @@ pub fn cross_entropy_loss(logits: &Tensor, targets: &[usize]) -> anyhow::Result<
     Ok(total / seq_len as f32)
 }
 
-/// Per-epoch loss summary.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TrainingResult {
-    pub epoch_losses: Vec<f32>,
+/// Gradient of cross-entropy loss w.r.t. the final hidden state (length `d_model`).
+///
+/// Untied: `d_hidden = grad_logits @ w_o^T`
+/// Tied:   `d_hidden = grad_logits @ token_embeddings`
+pub fn hidden_gradient(grad_logits: &[f32], model: &TinyModel) -> anyhow::Result<Vec<f32>> {
+    let d_model = model.config.d_model;
+    let vocab_size = model.config.vocab_size;
+
+    if grad_logits.len() != vocab_size {
+        bail!(
+            "grad_logits length {} does not match vocab_size {}",
+            grad_logits.len(),
+            vocab_size
+        );
+    }
+
+    let mut d_hidden = vec![0.0f32; d_model];
+
+    if model.config.tie_embeddings {
+        for d in 0..d_model {
+            let mut sum = 0.0f32;
+            for v in 0..vocab_size {
+                sum += grad_logits[v] * model.token_embeddings.get2d(v, d)?;
+            }
+            d_hidden[d] = sum;
+        }
+    } else {
+        for d in 0..d_model {
+            let mut sum = 0.0f32;
+            for v in 0..vocab_size {
+                sum += grad_logits[v] * model.w_o.get2d(d, v)?;
+            }
+            d_hidden[d] = sum;
+        }
+    }
+
+    Ok(d_hidden)
 }
 
-/// Educational training loop: forward through the full model, backprop only through
-/// the output projection into `token_embeddings` and (when untied) `w_o`.
+/// Per-epoch training summary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EpochMetrics {
+    pub loss: f32,
+    pub examples: usize,
+}
+
+/// Full training run summary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrainingResult {
+    pub epochs: Vec<EpochMetrics>,
+}
+
+/// Educational training loop: forward through the full model, backprop through the
+/// output projection into `token_embeddings` / `w_o`, and one step into prefix
+/// token embeddings via `hidden_gradient`.
 pub fn train(
     model: &mut TinyModel,
     dataset: &TextDataset,
@@ -148,7 +195,7 @@ pub fn train(
     }
 
     let mut rng = StdRng::seed_from_u64(seed);
-    let mut epoch_losses = Vec::with_capacity(config.epochs);
+    let mut epochs = Vec::with_capacity(config.epochs);
 
     for _ in 0..config.epochs {
         let mut shuffled = dataset.examples.clone();
@@ -163,10 +210,13 @@ pub fn train(
             num_examples += batch.len();
         }
 
-        epoch_losses.push(epoch_loss / num_examples as f32);
+        epochs.push(EpochMetrics {
+            loss: epoch_loss / num_examples as f32,
+            examples: num_examples,
+        });
     }
 
-    Ok(TrainingResult { epoch_losses })
+    Ok(TrainingResult { epochs })
 }
 
 /// Run one batch; returns mean loss over examples in the batch.
@@ -194,6 +244,7 @@ fn train_batch(
         let h_last = hidden.last_row()?;
         let logits_last = logits.last_row()?;
         let grad_logits = softmax_grad(&logits_last, example.target)?;
+        let d_hidden = hidden_gradient(&grad_logits, model)?;
 
         total_loss += cross_entropy_single(&logits_last, example.target)?;
 
@@ -201,18 +252,10 @@ fn train_batch(
             accumulate_tied_embedding_grad(&mut grad_embeddings, &grad_logits, &h_last, dm, vs);
         } else {
             accumulate_w_o_grad(&mut grad_w_o, &grad_logits, &h_last, dm, vs);
-            let last_token = *example
-                .prefix
-                .last()
-                .ok_or_else(|| anyhow::anyhow!("prefix must not be empty"))?;
-            accumulate_input_embedding_grad(
-                &mut grad_embeddings,
-                &grad_logits,
-                &model.w_o,
-                last_token,
-                dm,
-                vs,
-            )?;
+        }
+
+        for &token_id in &example.prefix {
+            accumulate_token_embedding_grad(&mut grad_embeddings, token_id, &d_hidden, dm);
         }
     }
 
@@ -272,22 +315,15 @@ fn accumulate_w_o_grad(
     }
 }
 
-fn accumulate_input_embedding_grad(
+fn accumulate_token_embedding_grad(
     grad_e: &mut [f32],
-    grad_logits: &[f32],
-    w_o: &Tensor,
-    last_token: usize,
+    token_id: usize,
+    d_hidden: &[f32],
     d_model: usize,
-    vocab_size: usize,
-) -> anyhow::Result<()> {
+) {
     for d in 0..d_model {
-        let mut d_h = 0.0f32;
-        for v in 0..vocab_size {
-            d_h += grad_logits[v] * w_o.get2d(d, v)?;
-        }
-        grad_e[last_token * d_model + d] += d_h;
+        grad_e[token_id * d_model + d] += d_hidden[d];
     }
-    Ok(())
 }
 
 fn apply_embedding_grad(
@@ -343,8 +379,13 @@ pub fn run_train(args: &TrainArgs) -> anyhow::Result<()> {
 
     let result = train(&mut model, &dataset, &config, args.seed)?;
 
-    for (i, loss) in result.epoch_losses.iter().enumerate() {
-        println!("Epoch {} Loss: {loss:.6}", i + 1);
+    for (i, metrics) in result.epochs.iter().enumerate() {
+        println!(
+            "Epoch {} Loss: {:.6} ({} examples)",
+            i + 1,
+            metrics.loss,
+            metrics.examples
+        );
     }
 
     save_checkpoint(&model, &args.output)?;
@@ -382,6 +423,13 @@ mod tests {
         std::env::temp_dir().join(format!("forge_train_{}_{name}.json", std::process::id()))
     }
 
+    fn embedding_row(model: &TinyModel, token_id: usize) -> Vec<f32> {
+        let dm = model.config.d_model;
+        (0..dm)
+            .map(|d| model.token_embeddings.get2d(token_id, d).unwrap())
+            .collect()
+    }
+
     #[test]
     fn cross_entropy_valid_shapes() {
         let logits = Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
@@ -405,7 +453,6 @@ mod tests {
 
     #[test]
     fn cross_entropy_lower_for_correct_predictions() {
-        // row 0 peaks at index 0; row 1 peaks at index 1
         let confident = Tensor::new(vec![10.0, 0.0, 0.0, 0.0, 10.0, 0.0], vec![2, 3]).unwrap();
         let uncertain = Tensor::new(vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0], vec![2, 3]).unwrap();
         let loss_confident = cross_entropy_loss(&confident, &[0, 1]).unwrap();
@@ -425,6 +472,57 @@ mod tests {
     fn cross_entropy_rejects_non_2d_logits() {
         let logits = Tensor::new(vec![1.0, 2.0, 3.0], vec![3]).unwrap();
         assert!(cross_entropy_loss(&logits, &[0, 1, 2]).is_err());
+    }
+
+    #[test]
+    fn hidden_gradient_shape_equals_d_model() {
+        let model = tiny_model(1);
+        let grad_logits = vec![0.1f32; model.config.vocab_size];
+        let d_hidden = hidden_gradient(&grad_logits, &model).unwrap();
+        assert_eq!(d_hidden.len(), model.config.d_model);
+    }
+
+    #[test]
+    fn hidden_gradient_is_nonzero_for_random_model() {
+        let model = tiny_model(2);
+        let mut grad_logits = vec![0.01f32; model.config.vocab_size];
+        grad_logits[3] = -0.02;
+        let d_hidden = hidden_gradient(&grad_logits, &model).unwrap();
+        assert!(d_hidden.iter().any(|&x| x.abs() > 1e-8));
+    }
+
+    #[test]
+    fn hidden_gradient_untied_matches_manual_matmul() {
+        let mut config = ModelConfig::for_vocab(test_tokenizer().vocab_size());
+        config.tie_embeddings = false;
+        let model = TinyModel::new_random(config, 3).unwrap();
+        let grad_logits: Vec<f32> = (0..model.config.vocab_size)
+            .map(|i| (i as f32 * 0.01) - 0.5)
+            .collect();
+        let d_hidden = hidden_gradient(&grad_logits, &model).unwrap();
+        for d in 0..model.config.d_model {
+            let mut expected = 0.0f32;
+            for v in 0..model.config.vocab_size {
+                expected += grad_logits[v] * model.w_o.get2d(d, v).unwrap();
+            }
+            assert!((d_hidden[d] - expected).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn hidden_gradient_tied_matches_manual_matmul() {
+        let model = tiny_model(4);
+        let grad_logits: Vec<f32> = (0..model.config.vocab_size)
+            .map(|i| (i as f32 * 0.01) - 0.5)
+            .collect();
+        let d_hidden = hidden_gradient(&grad_logits, &model).unwrap();
+        for d in 0..model.config.d_model {
+            let mut expected = 0.0f32;
+            for v in 0..model.config.vocab_size {
+                expected += grad_logits[v] * model.token_embeddings.get2d(v, d).unwrap();
+            }
+            assert!((d_hidden[d] - expected).abs() < 1e-5);
+        }
     }
 
     #[test]
@@ -495,15 +593,85 @@ mod tests {
         };
 
         let result = train(&mut model, &dataset, &config, 7).unwrap();
-        assert!(result.epoch_losses.len() == 8);
+        assert_eq!(result.epochs.len(), 8);
         assert!(
-            result.epoch_losses.last().unwrap() < result.epoch_losses.first().unwrap(),
+            result.epochs.last().unwrap().loss < result.epochs.first().unwrap().loss,
             "first={:?} last={:?}",
-            result.epoch_losses.first(),
-            result.epoch_losses.last()
+            result.epochs.first(),
+            result.epochs.last()
         );
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn training_converges_on_repeated_corpus() {
+        let tok = test_tokenizer();
+        let path = temp_txt(
+            "converge",
+            "hello hello hello hello hello hello hello hello",
+        );
+        let dataset = TextDataset::from_file(&path, &tok).unwrap();
+        let mut model = tiny_model(101);
+        let config = TrainingConfig {
+            learning_rate: 0.05,
+            epochs: 20,
+            batch_size: 8,
+        };
+
+        let result = train(&mut model, &dataset, &config, 11).unwrap();
+        let initial = result.epochs.first().unwrap().loss;
+        let final_loss = result.epochs.last().unwrap().loss;
+
+        assert!(final_loss < initial);
+        assert!(
+            final_loss <= initial * 0.95,
+            "initial={initial} final={final_loss}"
+        );
+        assert_eq!(
+            result.epochs.iter().map(|m| m.examples).collect::<Vec<_>>(),
+            vec![dataset.len(); 20]
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn multiple_token_embeddings_change_after_training() {
+        let tok = test_tokenizer();
+        let tokens = tok.encode("hello", false, false);
+        let dataset = TextDataset::from_tokens(&tokens).unwrap();
+        let mut model = tiny_model(55);
+
+        let distinct: Vec<usize> = tokens.iter().copied().collect();
+        let before: Vec<Vec<f32>> = distinct
+            .iter()
+            .map(|&id| embedding_row(&model, id))
+            .collect();
+
+        train(
+            &mut model,
+            &dataset,
+            &TrainingConfig {
+                learning_rate: 0.05,
+                epochs: 6,
+                batch_size: 2,
+            },
+            9,
+        )
+        .unwrap();
+
+        let mut changed = 0usize;
+        for (&id, row_before) in distinct.iter().zip(before.iter()) {
+            let row_after = embedding_row(&model, id);
+            if row_before != &row_after {
+                changed += 1;
+            }
+        }
+        assert!(
+            changed >= 3,
+            "expected multiple prefix token embeddings to change, got {changed}"
+        );
     }
 
     #[test]
@@ -522,8 +690,33 @@ mod tests {
         let ra = train(&mut a, &dataset, &config, 123).unwrap();
         let rb = train(&mut b, &dataset, &config, 123).unwrap();
 
-        assert_eq!(ra.epoch_losses, rb.epoch_losses);
+        assert_eq!(ra.epochs, rb.epochs);
         assert_eq!(a.token_embeddings.data, b.token_embeddings.data);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn epoch_metrics_track_example_count() {
+        let tok = test_tokenizer();
+        let path = temp_txt("metrics", "hello hello hello");
+        let dataset = TextDataset::from_file(&path, &tok).unwrap();
+        let mut model = tiny_model(66);
+        let result = train(
+            &mut model,
+            &dataset,
+            &TrainingConfig {
+                learning_rate: 0.03,
+                epochs: 2,
+                batch_size: 4,
+            },
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(result.epochs.len(), 2);
+        assert_eq!(result.epochs[0].examples, dataset.len());
+        assert_eq!(result.epochs[1].examples, dataset.len());
 
         let _ = fs::remove_file(path);
     }
