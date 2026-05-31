@@ -4,7 +4,7 @@ A tiny Rust inference runtime for transformer language models.
 
 ## Current status
 
-Sprint 14 — stacked transformer layers
+Sprint 15 — GELU activation + weight tying
 
 ## Implemented
 
@@ -16,12 +16,13 @@ Sprint 14 — stacked transformer layers
 - KV-cached decoding and incremental generation (optimized autoregressive inference)
 - Multi-head causal attention and multi-head KV cache
 - Transformer residual pathways and layer normalization
-- Feed-forward network (MLP)
+- Feed-forward network (MLP) with GELU activation
 - Second residual pathway
 - Second LayerNorm
 - Multi-layer transformer architecture
 - Per-layer KV cache
 - Configurable depth (`n_layers`)
+- Optional tied input/output embeddings (`tie_embeddings`)
 
 ## Quick start
 

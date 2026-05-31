@@ -141,6 +141,22 @@ impl Tensor {
         Self::new(data, self.shape.clone())
     }
 
+    /// Elementwise GELU (GPT approximation), preserving shape.
+    ///
+    /// `gelu(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`
+    pub fn gelu(&self) -> anyhow::Result<Tensor> {
+        const SQRT_2_OVER_PI: f32 = 0.797_884_560_802_865_4;
+        let data: Vec<f32> = self
+            .data
+            .iter()
+            .map(|&x| {
+                let inner = SQRT_2_OVER_PI * (x + 0.044_715 * x * x * x);
+                0.5 * x * (1.0 + inner.tanh())
+            })
+            .collect();
+        Self::new(data, self.shape.clone())
+    }
+
     /// Elementwise multiply; shapes must match exactly.
     pub fn mul(&self, other: &Tensor) -> anyhow::Result<Tensor> {
         if self.shape != other.shape {
@@ -861,6 +877,52 @@ mod tests {
         let t = Tensor::new(vec![-1.0, 2.0, -3.0, 4.0], vec![2, 2]).unwrap();
         let out = t.relu().unwrap();
         assert_eq!(out.shape(), t.shape());
+    }
+
+    #[test]
+    fn gelu_preserves_shape() {
+        let t = Tensor::new(vec![-1.0, 0.0, 1.0, 2.0], vec![2, 2]).unwrap();
+        let out = t.gelu().unwrap();
+        assert_eq!(out.shape(), t.shape());
+    }
+
+    #[test]
+    fn gelu_zero_is_near_zero() {
+        let t = Tensor::new(vec![0.0], vec![1]).unwrap();
+        let out = t.gelu().unwrap();
+        assert!(out.get1d(0).unwrap().abs() < 1e-6);
+    }
+
+    #[test]
+    fn gelu_nonzero_for_negative_inputs() {
+        let t = Tensor::new(vec![-1.0], vec![1]).unwrap();
+        let out = t.gelu().unwrap();
+        assert!(out.get1d(0).unwrap() < 0.0);
+        assert!(out.get1d(0).unwrap().abs() > 1e-3);
+    }
+
+    #[test]
+    fn gelu_differs_from_relu() {
+        let t = Tensor::new(vec![-2.0, -1.0, 0.0, 1.0, 2.0], vec![1, 5]).unwrap();
+        let gelu = t.gelu().unwrap();
+        let relu = t.relu().unwrap();
+        assert_ne!(gelu.data, relu.data);
+    }
+
+    #[test]
+    fn gelu_deterministic() {
+        let t = Tensor::new(vec![0.5, -0.3, 1.2], vec![1, 3]).unwrap();
+        let a = t.gelu().unwrap();
+        let b = t.gelu().unwrap();
+        assert_eq!(a.data, b.data);
+    }
+
+    #[test]
+    fn gelu_correctness_known_value() {
+        // gelu(1.0) ≈ 0.841192 with the GPT tanh approximation
+        let t = Tensor::new(vec![1.0], vec![1]).unwrap();
+        let out = t.gelu().unwrap();
+        assert!((out.get1d(0).unwrap() - 0.841_192).abs() < 1e-4);
     }
 
     #[test]

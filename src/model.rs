@@ -15,6 +15,12 @@ pub struct ModelConfig {
     pub d_model: usize,
     pub n_heads: usize,
     pub n_layers: usize,
+    #[serde(default = "default_tie_embeddings")]
+    pub tie_embeddings: bool,
+}
+
+fn default_tie_embeddings() -> bool {
+    true
 }
 
 impl ModelConfig {
@@ -26,6 +32,7 @@ impl ModelConfig {
             d_model: 16,
             n_heads: 4,
             n_layers: 2,
+            tie_embeddings: true,
         }
     }
 
@@ -60,7 +67,7 @@ impl ModelConfig {
     }
 }
 
-/// Position-wise feed-forward network (two linear layers + ReLU).
+/// Position-wise feed-forward network (two linear layers + GELU).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedForward {
     /// `[d_model, d_ff]`
@@ -84,10 +91,10 @@ impl FeedForward {
         })
     }
 
-    /// `x @ w1 → ReLU → @ w2`; output shape `[rows, d_model]`.
+    /// `x @ w1 → GELU → @ w2`; output shape `[rows, d_model]`.
     pub fn forward(&self, x: &Tensor) -> anyhow::Result<Tensor> {
         let hidden = x.matmul(&self.w1)?;
-        let hidden = hidden.relu()?;
+        let hidden = hidden.gelu()?;
         hidden.matmul(&self.w2)
     }
 }
@@ -340,7 +347,7 @@ impl TinyModel {
         for layer in &self.layers {
             x = layer.forward(&x, self.config.n_heads)?;
         }
-        x.matmul(&self.w_o)
+        self.project_logits(&x)
     }
 
     /// Incremental forward for one new token using per-layer KV caches.
@@ -375,7 +382,16 @@ impl TinyModel {
         for (layer, layer_cache) in self.layers.iter().zip(cache.layers.iter_mut()) {
             x = layer.forward_incremental(&x, layer_cache, self.config.n_heads)?;
         }
-        x.matmul(&self.w_o)
+        self.project_logits(&x)
+    }
+
+    /// Map hidden states to vocabulary logits (tied or untied output projection).
+    pub fn project_logits(&self, hidden: &Tensor) -> anyhow::Result<Tensor> {
+        if self.config.tie_embeddings {
+            hidden.matmul(&self.token_embeddings.transpose_2d()?)
+        } else {
+            hidden.matmul(&self.w_o)
+        }
     }
 
     /// Verify that weight tensor shapes match [`ModelConfig`].
@@ -459,6 +475,7 @@ mod tests {
             d_model: 4,
             n_heads: 4,
             n_layers: 2,
+            tie_embeddings: true,
         }
     }
 
@@ -516,6 +533,7 @@ mod tests {
         let cfg = ModelConfig::for_vocab(16);
         assert_eq!(cfg.head_dim(), 4);
         assert_eq!(cfg.n_layers, 2);
+        assert!(cfg.tie_embeddings);
     }
 
     #[test]
@@ -623,16 +641,22 @@ mod tests {
     }
 
     #[test]
-    fn feed_forward_relu_behavior() {
+    fn feed_forward_gelu_behavior() {
         let ffn = FeedForward {
             w1: Tensor::new(vec![-1.0; 16], vec![4, 4]).unwrap(),
             w2: Tensor::new(vec![1.0; 16], vec![4, 4]).unwrap(),
         };
         let x = Tensor::new(vec![1.0; 4], vec![1, 4]).unwrap();
         let out = ffn.forward(&x).unwrap();
-        for i in 0..4 {
-            assert_eq!(out.get2d(0, i).unwrap(), 0.0);
-        }
+        let relu_out = x
+            .matmul(&ffn.w1)
+            .unwrap()
+            .relu()
+            .unwrap()
+            .matmul(&ffn.w2)
+            .unwrap();
+        assert_ne!(out.data, relu_out.data);
+        assert!(out.data.iter().any(|&v| v != 0.0));
     }
 
     #[test]
@@ -843,9 +867,102 @@ mod tests {
         let attention_only =
             Attention::multi_head_causal(&q, &k, &v, model.config.n_heads).unwrap();
         let normalized = layer.attn_norm.forward(&attention_only).unwrap();
-        let logits_no_residual = normalized.matmul(&model.w_o).unwrap();
+        let logits_no_residual = model.project_logits(&normalized).unwrap();
 
         assert_ne!(logits_with_residual.data, logits_no_residual.data);
+    }
+
+    #[test]
+    fn tied_projection_output_shape() {
+        let model = TinyModel::new_random(test_config(), 20).unwrap();
+        assert!(model.config.tie_embeddings);
+        let hidden = Tensor::new(vec![0.1; 12], vec![3, 4]).unwrap();
+        let logits = model.project_logits(&hidden).unwrap();
+        assert_eq!(logits.shape(), &[3, 16]);
+    }
+
+    #[test]
+    fn untied_projection_output_shape() {
+        let mut cfg = test_config();
+        cfg.tie_embeddings = false;
+        let model = TinyModel::new_random(cfg, 21).unwrap();
+        let hidden = Tensor::new(vec![0.1; 12], vec![3, 4]).unwrap();
+        let logits = model.project_logits(&hidden).unwrap();
+        assert_eq!(logits.shape(), &[3, 16]);
+    }
+
+    #[test]
+    fn tied_projection_vocab_dimension_correctness() {
+        let mut cfg = test_config();
+        cfg.vocab_size = 8;
+        let model = TinyModel::new_random(cfg, 22).unwrap();
+        let hidden = Tensor::new(vec![0.2; 4], vec![1, 4]).unwrap();
+        let tied = model.project_logits(&hidden).unwrap();
+        let manual = hidden
+            .matmul(&model.token_embeddings.transpose_2d().unwrap())
+            .unwrap();
+        assert_eq!(tied.data, manual.data);
+        assert_eq!(tied.shape()[1], 8);
+    }
+
+    #[test]
+    fn untied_projection_uses_w_o() {
+        let mut cfg = test_config();
+        cfg.tie_embeddings = false;
+        let model = TinyModel::new_random(cfg, 23).unwrap();
+        let hidden = Tensor::new(vec![0.2; 4], vec![1, 4]).unwrap();
+        let untied = model.project_logits(&hidden).unwrap();
+        let manual = hidden.matmul(&model.w_o).unwrap();
+        assert_eq!(untied.data, manual.data);
+    }
+
+    #[test]
+    fn tied_and_untied_logits_differ() {
+        let mut cfg_tied = test_config();
+        cfg_tied.tie_embeddings = true;
+        let mut cfg_untied = test_config();
+        cfg_untied.tie_embeddings = false;
+        let tied = TinyModel::new_random(cfg_tied, 24).unwrap();
+        let untied = TinyModel::new_random(cfg_untied, 24).unwrap();
+        let token_ids = [1usize, 2];
+        assert_ne!(
+            tied.forward(&token_ids).unwrap().data,
+            untied.forward(&token_ids).unwrap().data
+        );
+    }
+
+    #[test]
+    fn checkpoint_preserves_tie_embeddings() {
+        let mut cfg = test_config();
+        cfg.tie_embeddings = false;
+        let model = TinyModel::new_random(cfg, 90).unwrap();
+        let path =
+            std::env::temp_dir().join(format!("forge_tie_checkpoint_{}.json", std::process::id()));
+
+        crate::checkpoint::save_checkpoint(&model, &path).unwrap();
+        let loaded = crate::checkpoint::load_checkpoint(&path).unwrap();
+
+        assert_eq!(model.config.tie_embeddings, loaded.config.tie_embeddings);
+        assert!(!loaded.config.tie_embeddings);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn generation_works_with_tied_embeddings() {
+        let model = TinyModel::new_random(test_config(), 91).unwrap();
+        assert!(model.config.tie_embeddings);
+        let logits = model.forward(&[1, 2]).unwrap();
+        assert_eq!(logits.shape(), &[2, 16]);
+    }
+
+    #[test]
+    fn generation_works_with_untied_embeddings() {
+        let mut cfg = test_config();
+        cfg.tie_embeddings = false;
+        let model = TinyModel::new_random(cfg, 92).unwrap();
+        let logits = model.forward(&[1, 2]).unwrap();
+        assert_eq!(logits.shape(), &[2, 16]);
     }
 
     #[test]

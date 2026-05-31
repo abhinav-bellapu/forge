@@ -88,6 +88,7 @@ mod tests {
             d_model: 4,
             n_heads: 4,
             n_layers: 2,
+            tie_embeddings: true,
         };
         TinyModel::new_random(config, 42).unwrap()
     }
@@ -130,6 +131,42 @@ mod tests {
             loaded.layers[0].ffn_norm.beta.data
         );
         assert_eq!(model.layers.len(), loaded.layers.len());
+        assert_eq!(model.config.tie_embeddings, loaded.config.tie_embeddings);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn checkpoint_roundtrip_preserves_tie_embeddings_false() {
+        let config = ModelConfig {
+            vocab_size: 16,
+            max_seq_len: 8,
+            d_model: 4,
+            n_heads: 4,
+            n_layers: 2,
+            tie_embeddings: false,
+        };
+        let model = TinyModel::new_random(config.clone(), 43).unwrap();
+        let path = temp_path("tie_false");
+
+        save_checkpoint(&model, &path).unwrap();
+        let loaded = load_checkpoint(&path).unwrap();
+
+        assert_eq!(loaded.config.tie_embeddings, false);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tied_embedding_model_reloads_successfully() {
+        let model = test_model();
+        assert!(model.config.tie_embeddings);
+        let path = temp_path("tied_reload");
+
+        save_checkpoint(&model, &path).unwrap();
+        let loaded = load_checkpoint(&path).unwrap();
+        assert!(loaded.validate_shapes().is_ok());
+        assert!(loaded.config.tie_embeddings);
 
         let _ = std::fs::remove_file(path);
     }

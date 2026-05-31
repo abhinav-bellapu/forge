@@ -419,4 +419,50 @@ mod tests {
 
         assert_eq!(out_a.generated_tokens, out_b.generated_tokens);
     }
+
+    #[test]
+    fn generation_works_with_tied_embeddings_enabled() {
+        let req = sample_request();
+        let (tok, model) = test_setup(42);
+        assert!(model.config.tie_embeddings);
+        let result = generate(&req, &tok, &model).unwrap();
+        assert_eq!(result.generated_tokens.len(), 4);
+    }
+
+    #[test]
+    fn generation_works_with_tied_embeddings_disabled() {
+        let req = sample_request();
+        let tokenizer = Tokenizer::from_file(tokenizer::default_vocab_path()).unwrap();
+        let mut config = ModelConfig::for_vocab(tokenizer.vocab_size());
+        config.tie_embeddings = false;
+        let model = TinyModel::new_random(config, 42).unwrap();
+        let result = generate(&req, &tokenizer, &model).unwrap();
+        assert_eq!(result.generated_tokens.len(), 4);
+    }
+
+    #[test]
+    fn generation_parity_with_tied_embeddings() {
+        let req = sample_request();
+        let (tok, model) = test_setup(42);
+        assert!(model.config.tie_embeddings);
+
+        let cached = generate(&req, &tok, &model).unwrap();
+        let baseline = generate_full_forward(&req, &tok, &model).unwrap();
+
+        assert_eq!(cached.generated_tokens, baseline.generated_tokens);
+    }
+
+    #[test]
+    fn generation_parity_with_untied_embeddings() {
+        let req = sample_request();
+        let tokenizer = Tokenizer::from_file(tokenizer::default_vocab_path()).unwrap();
+        let mut config = ModelConfig::for_vocab(tokenizer.vocab_size());
+        config.tie_embeddings = false;
+        let model = TinyModel::new_random(config, 42).unwrap();
+
+        let cached = generate(&req, &tokenizer, &model).unwrap();
+        let baseline = generate_full_forward(&req, &tokenizer, &model).unwrap();
+
+        assert_eq!(cached.generated_tokens, baseline.generated_tokens);
+    }
 }
