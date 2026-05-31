@@ -112,6 +112,10 @@ mod tests {
         assert_eq!(model.w_o.data, loaded.w_o.data);
         assert_eq!(model.attn_norm.gamma.data, loaded.attn_norm.gamma.data);
         assert_eq!(model.attn_norm.beta.data, loaded.attn_norm.beta.data);
+        assert_eq!(model.ffn.w1.data, loaded.ffn.w1.data);
+        assert_eq!(model.ffn.w2.data, loaded.ffn.w2.data);
+        assert_eq!(model.ffn_norm.gamma.data, loaded.ffn_norm.gamma.data);
+        assert_eq!(model.ffn_norm.beta.data, loaded.ffn_norm.beta.data);
 
         let _ = std::fs::remove_file(path);
     }

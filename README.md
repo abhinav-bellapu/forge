@@ -4,7 +4,7 @@ A tiny Rust inference runtime for transformer language models.
 
 ## Current status
 
-Sprint 12 — layer norm + residual connections
+Sprint 13 — complete transformer block
 
 ## Implemented
 
@@ -16,6 +16,9 @@ Sprint 12 — layer norm + residual connections
 - KV-cached decoding and incremental generation (optimized autoregressive inference)
 - Multi-head causal attention and multi-head KV cache
 - Transformer residual pathways and layer normalization
+- Feed-forward network (MLP)
+- Second residual pathway
+- Second LayerNorm
 
 ## Quick start
 

@@ -1,4 +1,4 @@
-//! Minimal transformer-style forward pass (embeddings + attention + norm + logits).
+//! Minimal transformer-style forward pass (embeddings + attention + FFN + norm + logits).
 
 use crate::attention::{Attention, MultiHeadKvCache};
 use crate::tensor::Tensor;
@@ -52,6 +52,38 @@ impl ModelConfig {
             );
         }
         Ok(())
+    }
+}
+
+/// Position-wise feed-forward network (two linear layers + ReLU).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedForward {
+    /// `[d_model, d_ff]`
+    pub w1: Tensor,
+    /// `[d_ff, d_model]`
+    pub w2: Tensor,
+}
+
+impl FeedForward {
+    pub fn new_random(d_model: usize, seed: u64) -> anyhow::Result<Self> {
+        if d_model == 0 {
+            bail!("d_model must be greater than 0");
+        }
+
+        let d_ff = 4 * d_model;
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        Ok(Self {
+            w1: random_tensor(d_model, d_ff, &mut rng)?,
+            w2: random_tensor(d_ff, d_model, &mut rng)?,
+        })
+    }
+
+    /// `x @ w1 → ReLU → @ w2`; output shape `[rows, d_model]`.
+    pub fn forward(&self, x: &Tensor) -> anyhow::Result<Tensor> {
+        let hidden = x.matmul(&self.w1)?;
+        let hidden = hidden.relu()?;
+        hidden.matmul(&self.w2)
     }
 }
 
@@ -110,7 +142,7 @@ impl LayerNorm {
     }
 }
 
-/// Tiny language model: embeddings, multi-head attention, residual + norm, logits.
+/// Tiny language model: embeddings, multi-head attention, FFN, residual + norm, logits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TinyModel {
     pub config: ModelConfig,
@@ -128,6 +160,9 @@ pub struct TinyModel {
     pub w_v: Tensor,
 
     pub attn_norm: LayerNorm,
+
+    pub ffn: FeedForward,
+    pub ffn_norm: LayerNorm,
 
     /// `[d_model, vocab_size]`
     pub w_o: Tensor,
@@ -152,6 +187,8 @@ impl TinyModel {
             w_k: random_tensor(d_model, d_model, &mut rng)?,
             w_v: random_tensor(d_model, d_model, &mut rng)?,
             attn_norm: LayerNorm::new(d_model)?,
+            ffn: FeedForward::new_random(d_model, seed.wrapping_add(1))?,
+            ffn_norm: LayerNorm::new(d_model)?,
             w_o: random_tensor(d_model, vocab_size, &mut rng)?,
         })
     }
@@ -227,14 +264,22 @@ impl TinyModel {
         Tensor::new(data, vec![1, d_model])
     }
 
-    /// Full forward pass: embeddings → attention block (residual + norm) → logits.
+    /// Full transformer block: attention (residual + norm) → FFN (residual + norm).
+    fn transformer_block(&self, x: &Tensor) -> anyhow::Result<Tensor> {
+        let norm1 = self.attention_block(x)?;
+        let ffn_out = self.ffn.forward(&norm1)?;
+        let residual2 = norm1.add(&ffn_out)?;
+        self.ffn_norm.forward(&residual2)
+    }
+
+    /// Full forward pass: embeddings → transformer block → logits.
     ///
     /// Recomputes attention over the entire sequence each call (no KV cache).
     /// Uses causal masking so logits match incremental KV-cache decoding.
     /// Output shape: `[seq_len, vocab_size]`.
     pub fn forward(&self, token_ids: &[usize]) -> anyhow::Result<Tensor> {
         let x = self.embed_tokens(token_ids)?;
-        let normalized = self.attention_block(&x)?;
+        let normalized = self.transformer_block(&x)?;
         let logits = normalized.matmul(&self.w_o)?;
         Ok(logits)
     }
@@ -265,8 +310,11 @@ impl TinyModel {
         let k = x.matmul(&self.w_k)?;
         let v = x.matmul(&self.w_v)?;
 
-        let normalized = self.attention_block_cached(&x, &q, &k, &v, cache)?;
-        let logits = normalized.matmul(&self.w_o)?;
+        let norm1 = self.attention_block_cached(&x, &q, &k, &v, cache)?;
+        let ffn_out = self.ffn.forward(&norm1)?;
+        let residual2 = norm1.add(&ffn_out)?;
+        let norm2 = self.ffn_norm.forward(&residual2)?;
+        let logits = norm2.matmul(&self.w_o)?;
         Ok(logits)
     }
 
@@ -286,6 +334,12 @@ impl TinyModel {
         expect_shape(&self.w_o, &[dm, vs], "w_o")?;
         expect_shape(&self.attn_norm.gamma, &[1, dm], "attn_norm.gamma")?;
         expect_shape(&self.attn_norm.beta, &[1, dm], "attn_norm.beta")?;
+
+        let d_ff = 4 * dm;
+        expect_shape(&self.ffn.w1, &[dm, d_ff], "ffn.w1")?;
+        expect_shape(&self.ffn.w2, &[d_ff, dm], "ffn.w2")?;
+        expect_shape(&self.ffn_norm.gamma, &[1, dm], "ffn_norm.gamma")?;
+        expect_shape(&self.ffn_norm.beta, &[1, dm], "ffn_norm.beta")?;
 
         Ok(())
     }
@@ -452,7 +506,62 @@ mod tests {
     }
 
     #[test]
-    fn incremental_forward_matches_causal_full_forward() {
+    fn checkpoint_preserves_layer_norm_params() {
+        let model = TinyModel::new_random(test_config(), 99).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "forge_ln_checkpoint_{}.json",
+            std::process::id()
+        ));
+
+        crate::checkpoint::save_checkpoint(&model, &path).unwrap();
+        let loaded = crate::checkpoint::load_checkpoint(&path).unwrap();
+
+        assert_eq!(model.attn_norm.gamma.data, loaded.attn_norm.gamma.data);
+        assert_eq!(model.attn_norm.beta.data, loaded.attn_norm.beta.data);
+        assert_eq!(model.attn_norm.epsilon, loaded.attn_norm.epsilon);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn feed_forward_output_shape() {
+        let ffn = FeedForward::new_random(4, 42).unwrap();
+        let x = Tensor::new(vec![1.0; 8], vec![2, 4]).unwrap();
+        let out = ffn.forward(&x).unwrap();
+        assert_eq!(out.shape(), &[2, 4]);
+    }
+
+    #[test]
+    fn feed_forward_relu_behavior() {
+        let ffn = FeedForward {
+            w1: Tensor::new(vec![-1.0; 16], vec![4, 4]).unwrap(),
+            w2: Tensor::new(vec![1.0; 16], vec![4, 4]).unwrap(),
+        };
+        let x = Tensor::new(vec![1.0; 4], vec![1, 4]).unwrap();
+        let out = ffn.forward(&x).unwrap();
+        for i in 0..4 {
+            assert_eq!(out.get2d(0, i).unwrap(), 0.0);
+        }
+    }
+
+    #[test]
+    fn feed_forward_deterministic_same_seed() {
+        let a = FeedForward::new_random(4, 77).unwrap();
+        let b = FeedForward::new_random(4, 77).unwrap();
+        assert_eq!(a.w1.data, b.w1.data);
+        assert_eq!(a.w2.data, b.w2.data);
+    }
+
+    #[test]
+    fn transformer_block_output_shape() {
+        let model = TinyModel::new_random(test_config(), 3).unwrap();
+        let x = Tensor::new(vec![0.1; 12], vec![3, 4]).unwrap();
+        let out = model.transformer_block(&x).unwrap();
+        assert_eq!(out.shape(), &[3, 4]);
+    }
+
+    #[test]
+    fn incremental_forward_matches_full_forward() {
         let model = TinyModel::new_random(test_config(), 11).unwrap();
         let token_ids = [2usize, 5, 7];
 
@@ -476,6 +585,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn checkpoint_preserves_ffn_weights() {
+        let model = TinyModel::new_random(test_config(), 88).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "forge_ffn_checkpoint_{}.json",
+            std::process::id()
+        ));
+
+        crate::checkpoint::save_checkpoint(&model, &path).unwrap();
+        let loaded = crate::checkpoint::load_checkpoint(&path).unwrap();
+
+        assert_eq!(model.ffn.w1.data, loaded.ffn.w1.data);
+        assert_eq!(model.ffn.w2.data, loaded.ffn.w2.data);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn checkpoint_preserves_ffn_norm() {
+        let model = TinyModel::new_random(test_config(), 89).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "forge_ffn_norm_checkpoint_{}.json",
+            std::process::id()
+        ));
+
+        crate::checkpoint::save_checkpoint(&model, &path).unwrap();
+        let loaded = crate::checkpoint::load_checkpoint(&path).unwrap();
+
+        assert_eq!(model.ffn_norm.gamma.data, loaded.ffn_norm.gamma.data);
+        assert_eq!(model.ffn_norm.beta.data, loaded.ffn_norm.beta.data);
+        assert_eq!(model.ffn_norm.epsilon, loaded.ffn_norm.epsilon);
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -543,23 +687,5 @@ mod tests {
         let logits_no_residual = normalized.matmul(&model.w_o).unwrap();
 
         assert_ne!(logits_with_residual.data, logits_no_residual.data);
-    }
-
-    #[test]
-    fn checkpoint_preserves_layer_norm_params() {
-        let model = TinyModel::new_random(test_config(), 99).unwrap();
-        let path = std::env::temp_dir().join(format!(
-            "forge_ln_checkpoint_{}.json",
-            std::process::id()
-        ));
-
-        crate::checkpoint::save_checkpoint(&model, &path).unwrap();
-        let loaded = crate::checkpoint::load_checkpoint(&path).unwrap();
-
-        assert_eq!(model.attn_norm.gamma.data, loaded.attn_norm.gamma.data);
-        assert_eq!(model.attn_norm.beta.data, loaded.attn_norm.beta.data);
-        assert_eq!(model.attn_norm.epsilon, loaded.attn_norm.epsilon);
-
-        let _ = std::fs::remove_file(path);
     }
 }

@@ -148,6 +148,12 @@ impl Tensor {
         Ok(())
     }
 
+    /// Elementwise ReLU: `max(0, x)`, preserving shape.
+    pub fn relu(&self) -> anyhow::Result<Tensor> {
+        let data: Vec<f32> = self.data.iter().map(|&x| x.max(0.0)).collect();
+        Self::new(data, self.shape.clone())
+    }
+
     /// Elementwise multiply; shapes must match exactly.
     pub fn mul(&self, other: &Tensor) -> anyhow::Result<Tensor> {
         if self.shape != other.shape {
@@ -857,6 +863,20 @@ mod tests {
         let a = Tensor::new(vec![1.0, 2.0], vec![2]).unwrap();
         let b = Tensor::new(vec![1.0; 4], vec![2, 2]).unwrap();
         assert!(a.concat_rows(&b).is_err());
+    }
+
+    #[test]
+    fn relu_correctness() {
+        let t = Tensor::new(vec![-2.0, -1.0, 0.0, 1.0, 2.0], vec![1, 5]).unwrap();
+        let out = t.relu().unwrap();
+        assert_eq!(out.data, vec![0.0, 0.0, 0.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn relu_preserves_shape() {
+        let t = Tensor::new(vec![-1.0, 2.0, -3.0, 4.0], vec![2, 2]).unwrap();
+        let out = t.relu().unwrap();
+        assert_eq!(out.shape(), t.shape());
     }
 
     #[test]
