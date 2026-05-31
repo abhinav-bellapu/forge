@@ -67,11 +67,7 @@ impl Tokenizer {
 
         for ch in text.chars() {
             let token = ch.to_string();
-            let id = self
-                .token_to_id
-                .get(&token)
-                .copied()
-                .unwrap_or(self.unk_id);
+            let id = self.token_to_id.get(&token).copied().unwrap_or(self.unk_id);
             ids.push(id);
         }
 

@@ -1,13 +1,13 @@
-use crate::attention::MultiHeadKvCache;
+use crate::attention::ModelKvCache;
 use crate::checkpoint::load_checkpoint;
 use crate::cli::GenerateArgs;
 use crate::model::{ModelConfig, TinyModel};
-use std::path::Path;
 use crate::sampling::Sampler;
 use crate::tokenizer::{self, Tokenizer};
 use anyhow::bail;
-use rand::SeedableRng;
 use rand::rngs::StdRng;
+use rand::SeedableRng;
+use std::path::Path;
 
 /// Parameters for a single generation request.
 #[derive(Debug, Clone, PartialEq)]
@@ -137,8 +137,11 @@ pub fn generate(
     }
 
     let mut sample_rng = StdRng::seed_from_u64(req.seed.unwrap_or(42));
-    let mut cache =
-        MultiHeadKvCache::empty(model.config.n_heads, model.config.head_dim())?;
+    let mut cache = ModelKvCache::new(
+        model.config.n_layers,
+        model.config.n_heads,
+        model.config.head_dim(),
+    )?;
     let mut last_logits = None;
 
     // Warm the cache from the prompt (incremental forwards, same math as full forward).
@@ -162,11 +165,7 @@ pub fn generate(
         tokens.push(next_token);
 
         let position = tokens.len() - 1;
-        last_logits = Some(model.forward_incremental(
-            next_token,
-            position,
-            &mut cache,
-        )?);
+        last_logits = Some(model.forward_incremental(next_token, position, &mut cache)?);
     }
 
     let generated_tokens = tokens[input_len..].to_vec();
@@ -184,8 +183,7 @@ pub fn generate(
 pub fn run_generate(args: &GenerateArgs) -> anyhow::Result<()> {
     let req = GenerateRequest::from(args);
     let seed = req.seed.unwrap_or(42);
-    let (tokenizer, model) =
-        load_tokenizer_and_model(seed, args.checkpoint.as_deref())?;
+    let (tokenizer, model) = load_tokenizer_and_model(seed, args.checkpoint.as_deref())?;
     let result = generate(&req, &tokenizer, &model)?;
 
     println!("Prompt: {}", req.prompt);
@@ -368,7 +366,8 @@ mod tests {
         let (tok, model) = test_setup(42);
         let input_len = tok.encode(&req.prompt, false, false).len();
 
-        let mut cache = MultiHeadKvCache::empty(
+        let mut cache = ModelKvCache::new(
+            model.config.n_layers,
             model.config.n_heads,
             model.config.head_dim(),
         )

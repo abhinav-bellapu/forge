@@ -2,8 +2,8 @@
 
 use crate::tensor::Tensor;
 use anyhow::bail;
-use rand::Rng;
 use rand::rngs::StdRng;
+use rand::Rng;
 
 /// Sampling helpers for next-token prediction.
 #[derive(Debug, Default)]
@@ -67,15 +67,8 @@ impl Sampler {
         let k = k.min(logits.len());
         let scaled: Vec<f32> = logits.iter().map(|x| x / temperature).collect();
 
-        let mut ranked: Vec<(usize, f32)> = scaled
-            .iter()
-            .copied()
-            .enumerate()
-            .collect();
-        ranked.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        let mut ranked: Vec<(usize, f32)> = scaled.iter().copied().enumerate().collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         ranked.truncate(k);
 
         let top_indices: Vec<usize> = ranked.iter().map(|(idx, _)| *idx).collect();

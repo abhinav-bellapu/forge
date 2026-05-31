@@ -1,10 +1,10 @@
-//! Minimal transformer-style forward pass (embeddings + attention + FFN + norm + logits).
+//! Minimal transformer-style forward pass (embeddings + stacked layers + logits).
 
-use crate::attention::{Attention, MultiHeadKvCache};
+use crate::attention::{Attention, ModelKvCache, MultiHeadKvCache};
 use crate::tensor::Tensor;
 use anyhow::bail;
-use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 /// Hyperparameters for [`TinyModel`].
@@ -14,6 +14,7 @@ pub struct ModelConfig {
     pub max_seq_len: usize,
     pub d_model: usize,
     pub n_heads: usize,
+    pub n_layers: usize,
 }
 
 impl ModelConfig {
@@ -24,6 +25,7 @@ impl ModelConfig {
             max_seq_len: 64,
             d_model: 16,
             n_heads: 4,
+            n_layers: 2,
         }
     }
 
@@ -43,6 +45,9 @@ impl ModelConfig {
         }
         if self.n_heads == 0 {
             bail!("n_heads must be greater than 0");
+        }
+        if self.n_layers == 0 {
+            bail!("n_layers must be greater than 0");
         }
         if self.d_model % self.n_heads != 0 {
             bail!(
@@ -142,16 +147,9 @@ impl LayerNorm {
     }
 }
 
-/// Tiny language model: embeddings, multi-head attention, FFN, residual + norm, logits.
+/// One transformer block: attention + FFN, each with residual and layer norm.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TinyModel {
-    pub config: ModelConfig,
-
-    /// `[vocab_size, d_model]`
-    pub token_embeddings: Tensor,
-    /// `[max_seq_len, d_model]`
-    pub positional_embeddings: Tensor,
-
+pub struct TransformerLayer {
     /// `[d_model, d_model]`
     pub w_q: Tensor,
     /// `[d_model, d_model]`
@@ -163,6 +161,97 @@ pub struct TinyModel {
 
     pub ffn: FeedForward,
     pub ffn_norm: LayerNorm,
+}
+
+impl TransformerLayer {
+    pub fn new_random(d_model: usize, seed: u64) -> anyhow::Result<Self> {
+        if d_model == 0 {
+            bail!("d_model must be greater than 0");
+        }
+
+        let mut rng = StdRng::seed_from_u64(seed);
+
+        Ok(Self {
+            w_q: random_tensor(d_model, d_model, &mut rng)?,
+            w_k: random_tensor(d_model, d_model, &mut rng)?,
+            w_v: random_tensor(d_model, d_model, &mut rng)?,
+            attn_norm: LayerNorm::new(d_model)?,
+            ffn: FeedForward::new_random(d_model, seed.wrapping_add(1))?,
+            ffn_norm: LayerNorm::new(d_model)?,
+        })
+    }
+
+    /// Full forward: attention → residual → norm → FFN → residual → norm.
+    pub fn forward(&self, x: &Tensor, n_heads: usize) -> anyhow::Result<Tensor> {
+        let q = x.matmul(&self.w_q)?;
+        let k = x.matmul(&self.w_k)?;
+        let v = x.matmul(&self.w_v)?;
+        let attention_output = Attention::multi_head_causal(&q, &k, &v, n_heads)?;
+        let norm1 = self.attn_norm.forward(&x.add(&attention_output)?)?;
+        let ffn_out = self.ffn.forward(&norm1)?;
+        let residual2 = norm1.add(&ffn_out)?;
+        self.ffn_norm.forward(&residual2)
+    }
+
+    /// Incremental forward for one new token row using a per-layer KV cache.
+    pub fn forward_incremental(
+        &self,
+        x: &Tensor,
+        cache: &mut MultiHeadKvCache,
+        _n_heads: usize,
+    ) -> anyhow::Result<Tensor> {
+        let q = x.matmul(&self.w_q)?;
+        let k = x.matmul(&self.w_k)?;
+        let v = x.matmul(&self.w_v)?;
+        let attention_output = Attention::multi_head_cached(&q, &k, &v, cache)?;
+        let norm1 = self.attn_norm.forward(&x.add(&attention_output)?)?;
+        let ffn_out = self.ffn.forward(&norm1)?;
+        let residual2 = norm1.add(&ffn_out)?;
+        self.ffn_norm.forward(&residual2)
+    }
+
+    pub fn validate_shapes(&self, d_model: usize, prefix: &str) -> anyhow::Result<()> {
+        let d_ff = 4 * d_model;
+        expect_shape(&self.w_q, &[d_model, d_model], &format!("{prefix}.w_q"))?;
+        expect_shape(&self.w_k, &[d_model, d_model], &format!("{prefix}.w_k"))?;
+        expect_shape(&self.w_v, &[d_model, d_model], &format!("{prefix}.w_v"))?;
+        expect_shape(
+            &self.attn_norm.gamma,
+            &[1, d_model],
+            &format!("{prefix}.attn_norm.gamma"),
+        )?;
+        expect_shape(
+            &self.attn_norm.beta,
+            &[1, d_model],
+            &format!("{prefix}.attn_norm.beta"),
+        )?;
+        expect_shape(&self.ffn.w1, &[d_model, d_ff], &format!("{prefix}.ffn.w1"))?;
+        expect_shape(&self.ffn.w2, &[d_ff, d_model], &format!("{prefix}.ffn.w2"))?;
+        expect_shape(
+            &self.ffn_norm.gamma,
+            &[1, d_model],
+            &format!("{prefix}.ffn_norm.gamma"),
+        )?;
+        expect_shape(
+            &self.ffn_norm.beta,
+            &[1, d_model],
+            &format!("{prefix}.ffn_norm.beta"),
+        )?;
+        Ok(())
+    }
+}
+
+/// Tiny language model: embeddings, stacked transformer layers, logits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TinyModel {
+    pub config: ModelConfig,
+
+    /// `[vocab_size, d_model]`
+    pub token_embeddings: Tensor,
+    /// `[max_seq_len, d_model]`
+    pub positional_embeddings: Tensor,
+
+    pub layers: Vec<TransformerLayer>,
 
     /// `[d_model, vocab_size]`
     pub w_o: Tensor,
@@ -176,46 +265,23 @@ impl TinyModel {
         let vocab_size = config.vocab_size;
         let max_seq_len = config.max_seq_len;
         let d_model = config.d_model;
+        let n_layers = config.n_layers;
 
         let mut rng = StdRng::seed_from_u64(seed);
+
+        let mut layers = Vec::with_capacity(n_layers);
+        for i in 0..n_layers {
+            let layer_seed = seed.wrapping_add((i as u64).wrapping_mul(1000));
+            layers.push(TransformerLayer::new_random(d_model, layer_seed)?);
+        }
 
         Ok(Self {
             config: config.clone(),
             token_embeddings: random_tensor(vocab_size, d_model, &mut rng)?,
             positional_embeddings: random_tensor(max_seq_len, d_model, &mut rng)?,
-            w_q: random_tensor(d_model, d_model, &mut rng)?,
-            w_k: random_tensor(d_model, d_model, &mut rng)?,
-            w_v: random_tensor(d_model, d_model, &mut rng)?,
-            attn_norm: LayerNorm::new(d_model)?,
-            ffn: FeedForward::new_random(d_model, seed.wrapping_add(1))?,
-            ffn_norm: LayerNorm::new(d_model)?,
+            layers,
             w_o: random_tensor(d_model, vocab_size, &mut rng)?,
         })
-    }
-
-    /// Attention sub-block: multi-head causal attention, residual add, layer norm.
-    fn attention_block(&self, x: &Tensor) -> anyhow::Result<Tensor> {
-        let q = x.matmul(&self.w_q)?;
-        let k = x.matmul(&self.w_k)?;
-        let v = x.matmul(&self.w_v)?;
-        let attention_output =
-            Attention::multi_head_causal(&q, &k, &v, self.config.n_heads)?;
-        let residual = x.add(&attention_output)?;
-        self.attn_norm.forward(&residual)
-    }
-
-    /// Cached attention sub-block for one new token row.
-    fn attention_block_cached(
-        &self,
-        x: &Tensor,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        cache: &mut MultiHeadKvCache,
-    ) -> anyhow::Result<Tensor> {
-        let attention_output = Attention::multi_head_cached(q, k, v, cache)?;
-        let residual = x.add(&attention_output)?;
-        self.attn_norm.forward(&residual)
     }
 
     /// Embed token IDs with learned token and positional vectors.
@@ -264,30 +330,23 @@ impl TinyModel {
         Tensor::new(data, vec![1, d_model])
     }
 
-    /// Full transformer block: attention (residual + norm) → FFN (residual + norm).
-    fn transformer_block(&self, x: &Tensor) -> anyhow::Result<Tensor> {
-        let norm1 = self.attention_block(x)?;
-        let ffn_out = self.ffn.forward(&norm1)?;
-        let residual2 = norm1.add(&ffn_out)?;
-        self.ffn_norm.forward(&residual2)
-    }
-
-    /// Full forward pass: embeddings → transformer block → logits.
+    /// Full forward pass: embeddings → stacked layers → logits.
     ///
     /// Recomputes attention over the entire sequence each call (no KV cache).
     /// Uses causal masking so logits match incremental KV-cache decoding.
     /// Output shape: `[seq_len, vocab_size]`.
     pub fn forward(&self, token_ids: &[usize]) -> anyhow::Result<Tensor> {
-        let x = self.embed_tokens(token_ids)?;
-        let normalized = self.transformer_block(&x)?;
-        let logits = normalized.matmul(&self.w_o)?;
-        Ok(logits)
+        let mut x = self.embed_tokens(token_ids)?;
+        for layer in &self.layers {
+            x = layer.forward(&x, self.config.n_heads)?;
+        }
+        x.matmul(&self.w_o)
     }
 
-    /// Incremental forward for one new token using a multi-head KV cache.
+    /// Incremental forward for one new token using per-layer KV caches.
     ///
-    /// Embeds only the new token, appends per-head K/V rows, runs cached
-    /// multi-head attention, and returns logits for that position.
+    /// Embeds only the new token, runs each layer with its cache, and returns
+    /// logits for that position.
     ///
     /// `position` must equal the cache length before append.
     ///
@@ -296,8 +355,15 @@ impl TinyModel {
         &self,
         token_id: usize,
         position: usize,
-        cache: &mut MultiHeadKvCache,
+        cache: &mut ModelKvCache,
     ) -> anyhow::Result<Tensor> {
+        if cache.layers.len() != self.layers.len() {
+            bail!(
+                "cache has {} layers but model has {}",
+                cache.layers.len(),
+                self.layers.len()
+            );
+        }
         if position != cache.len() {
             bail!(
                 "position {position} does not match cache length {}",
@@ -305,17 +371,11 @@ impl TinyModel {
             );
         }
 
-        let x = self.embed_token(token_id, position)?;
-        let q = x.matmul(&self.w_q)?;
-        let k = x.matmul(&self.w_k)?;
-        let v = x.matmul(&self.w_v)?;
-
-        let norm1 = self.attention_block_cached(&x, &q, &k, &v, cache)?;
-        let ffn_out = self.ffn.forward(&norm1)?;
-        let residual2 = norm1.add(&ffn_out)?;
-        let norm2 = self.ffn_norm.forward(&residual2)?;
-        let logits = norm2.matmul(&self.w_o)?;
-        Ok(logits)
+        let mut x = self.embed_token(token_id, position)?;
+        for (layer, layer_cache) in self.layers.iter().zip(cache.layers.iter_mut()) {
+            x = layer.forward_incremental(&x, layer_cache, self.config.n_heads)?;
+        }
+        x.matmul(&self.w_o)
     }
 
     /// Verify that weight tensor shapes match [`ModelConfig`].
@@ -327,19 +387,24 @@ impl TinyModel {
         let dm = self.config.d_model;
 
         expect_shape(&self.token_embeddings, &[vs, dm], "token_embeddings")?;
-        expect_shape(&self.positional_embeddings, &[msl, dm], "positional_embeddings")?;
-        expect_shape(&self.w_q, &[dm, dm], "w_q")?;
-        expect_shape(&self.w_k, &[dm, dm], "w_k")?;
-        expect_shape(&self.w_v, &[dm, dm], "w_v")?;
+        expect_shape(
+            &self.positional_embeddings,
+            &[msl, dm],
+            "positional_embeddings",
+        )?;
         expect_shape(&self.w_o, &[dm, vs], "w_o")?;
-        expect_shape(&self.attn_norm.gamma, &[1, dm], "attn_norm.gamma")?;
-        expect_shape(&self.attn_norm.beta, &[1, dm], "attn_norm.beta")?;
 
-        let d_ff = 4 * dm;
-        expect_shape(&self.ffn.w1, &[dm, d_ff], "ffn.w1")?;
-        expect_shape(&self.ffn.w2, &[d_ff, dm], "ffn.w2")?;
-        expect_shape(&self.ffn_norm.gamma, &[1, dm], "ffn_norm.gamma")?;
-        expect_shape(&self.ffn_norm.beta, &[1, dm], "ffn_norm.beta")?;
+        if self.layers.len() != self.config.n_layers {
+            bail!(
+                "layers length {} does not match n_layers {}",
+                self.layers.len(),
+                self.config.n_layers
+            );
+        }
+
+        for (i, layer) in self.layers.iter().enumerate() {
+            layer.validate_shapes(dm, &format!("layers[{i}]"))?;
+        }
 
         Ok(())
     }
@@ -385,7 +450,7 @@ fn random_tensor(rows: usize, cols: usize, rng: &mut StdRng) -> anyhow::Result<T
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::attention::MultiHeadKvCache;
+    use crate::attention::ModelKvCache;
 
     fn test_config() -> ModelConfig {
         ModelConfig {
@@ -393,6 +458,7 @@ mod tests {
             max_seq_len: 8,
             d_model: 4,
             n_heads: 4,
+            n_layers: 2,
         }
     }
 
@@ -402,6 +468,16 @@ mod tests {
         assert_eq!(model.token_embeddings.shape(), &[16, 4]);
         assert_eq!(model.positional_embeddings.shape(), &[8, 4]);
         assert_eq!(model.w_o.shape(), &[4, 16]);
+        assert_eq!(model.layers.len(), 2);
+    }
+
+    #[test]
+    fn multiple_layers_initialize() {
+        let mut cfg = test_config();
+        cfg.n_layers = 3;
+        let model = TinyModel::new_random(cfg, 1).unwrap();
+        assert_eq!(model.layers.len(), 3);
+        assert!(model.validate_shapes().is_ok());
     }
 
     #[test]
@@ -421,6 +497,10 @@ mod tests {
         cfg = test_config();
         cfg.n_heads = 0;
         assert!(cfg.validate().is_err());
+
+        cfg = test_config();
+        cfg.n_layers = 0;
+        assert!(cfg.validate().is_err());
     }
 
     #[test]
@@ -435,6 +515,7 @@ mod tests {
     fn head_dim_helper() {
         let cfg = ModelConfig::for_vocab(16);
         assert_eq!(cfg.head_dim(), 4);
+        assert_eq!(cfg.n_layers, 2);
     }
 
     #[test]
@@ -475,7 +556,7 @@ mod tests {
         let a = TinyModel::new_random(cfg.clone(), 123).unwrap();
         let b = TinyModel::new_random(cfg, 123).unwrap();
         assert_eq!(a.token_embeddings.data, b.token_embeddings.data);
-        assert_eq!(a.w_q.data, b.w_q.data);
+        assert_eq!(a.layers[0].w_q.data, b.layers[0].w_q.data);
         assert_eq!(a.w_o.data, b.w_o.data);
     }
 
@@ -496,29 +577,39 @@ mod tests {
     #[test]
     fn incremental_forward_output_shape() {
         let model = TinyModel::new_random(test_config(), 7).unwrap();
-        let mut cache =
-            MultiHeadKvCache::empty(model.config.n_heads, model.config.head_dim())
-                .unwrap();
+        let mut cache = ModelKvCache::new(
+            model.config.n_layers,
+            model.config.n_heads,
+            model.config.head_dim(),
+        )
+        .unwrap();
         let logits = model.forward_incremental(2, 0, &mut cache).unwrap();
         assert_eq!(logits.shape(), &[1, 16]);
         assert_eq!(cache.len(), 1);
-        assert_eq!(cache.heads.len(), 4);
+        assert_eq!(cache.layers.len(), 2);
     }
 
     #[test]
     fn checkpoint_preserves_layer_norm_params() {
         let model = TinyModel::new_random(test_config(), 99).unwrap();
-        let path = std::env::temp_dir().join(format!(
-            "forge_ln_checkpoint_{}.json",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("forge_ln_checkpoint_{}.json", std::process::id()));
 
         crate::checkpoint::save_checkpoint(&model, &path).unwrap();
         let loaded = crate::checkpoint::load_checkpoint(&path).unwrap();
 
-        assert_eq!(model.attn_norm.gamma.data, loaded.attn_norm.gamma.data);
-        assert_eq!(model.attn_norm.beta.data, loaded.attn_norm.beta.data);
-        assert_eq!(model.attn_norm.epsilon, loaded.attn_norm.epsilon);
+        assert_eq!(
+            model.layers[0].attn_norm.gamma.data,
+            loaded.layers[0].attn_norm.gamma.data
+        );
+        assert_eq!(
+            model.layers[0].attn_norm.beta.data,
+            loaded.layers[0].attn_norm.beta.data
+        );
+        assert_eq!(
+            model.layers[0].attn_norm.epsilon,
+            loaded.layers[0].attn_norm.epsilon
+        );
 
         let _ = std::fs::remove_file(path);
     }
@@ -553,11 +644,43 @@ mod tests {
     }
 
     #[test]
-    fn transformer_block_output_shape() {
-        let model = TinyModel::new_random(test_config(), 3).unwrap();
+    fn transformer_layer_output_shape() {
+        let layer = TransformerLayer::new_random(4, 3).unwrap();
         let x = Tensor::new(vec![0.1; 12], vec![3, 4]).unwrap();
-        let out = model.transformer_block(&x).unwrap();
+        let out = layer.forward(&x, 4).unwrap();
         assert_eq!(out.shape(), &[3, 4]);
+    }
+
+    #[test]
+    fn transformer_layer_incremental_matches_full_forward() {
+        let layer = TransformerLayer::new_random(4, 11).unwrap();
+        let token_rows = Tensor::new(
+            vec![0.2, -0.1, 0.3, 0.0, 0.5, 0.1, -0.2, 0.4, 0.3, 0.0, 0.1, 0.2],
+            vec![3, 4],
+        )
+        .unwrap();
+
+        let full_out = layer.forward(&token_rows, 4).unwrap();
+
+        let mut cache = crate::attention::MultiHeadKvCache::empty(4, 1).unwrap();
+        let mut incremental_out = None;
+
+        for row in 0..3 {
+            let x = token_rows.row(row).unwrap();
+            let x = Tensor::new(x.data, vec![1, 4]).unwrap();
+            incremental_out = Some(layer.forward_incremental(&x, &mut cache, 4).unwrap());
+        }
+
+        let inc = incremental_out.unwrap();
+        let full_last: Vec<f32> = (0..4).map(|c| full_out.get2d(2, c).unwrap()).collect();
+        let inc_row = inc.last_row().unwrap();
+
+        for (a, b) in inc_row.iter().zip(full_last.iter()) {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "layer incremental mismatch: {a} vs {b}"
+            );
+        }
     }
 
     #[test]
@@ -566,9 +689,12 @@ mod tests {
         let token_ids = [2usize, 5, 7];
 
         let full_logits = model.forward(&token_ids).unwrap();
-        let mut cache =
-            MultiHeadKvCache::empty(model.config.n_heads, model.config.head_dim())
-                .unwrap();
+        let mut cache = ModelKvCache::new(
+            model.config.n_layers,
+            model.config.n_heads,
+            model.config.head_dim(),
+        )
+        .unwrap();
 
         for (pos, &tid) in token_ids.iter().enumerate() {
             let incremental = model.forward_incremental(tid, pos, &mut cache).unwrap();
@@ -590,16 +716,14 @@ mod tests {
     #[test]
     fn checkpoint_preserves_ffn_weights() {
         let model = TinyModel::new_random(test_config(), 88).unwrap();
-        let path = std::env::temp_dir().join(format!(
-            "forge_ffn_checkpoint_{}.json",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("forge_ffn_checkpoint_{}.json", std::process::id()));
 
         crate::checkpoint::save_checkpoint(&model, &path).unwrap();
         let loaded = crate::checkpoint::load_checkpoint(&path).unwrap();
 
-        assert_eq!(model.ffn.w1.data, loaded.ffn.w1.data);
-        assert_eq!(model.ffn.w2.data, loaded.ffn.w2.data);
+        assert_eq!(model.layers[0].ffn.w1.data, loaded.layers[0].ffn.w1.data);
+        assert_eq!(model.layers[0].ffn.w2.data, loaded.layers[0].ffn.w2.data);
 
         let _ = std::fs::remove_file(path);
     }
@@ -615,9 +739,40 @@ mod tests {
         crate::checkpoint::save_checkpoint(&model, &path).unwrap();
         let loaded = crate::checkpoint::load_checkpoint(&path).unwrap();
 
-        assert_eq!(model.ffn_norm.gamma.data, loaded.ffn_norm.gamma.data);
-        assert_eq!(model.ffn_norm.beta.data, loaded.ffn_norm.beta.data);
-        assert_eq!(model.ffn_norm.epsilon, loaded.ffn_norm.epsilon);
+        assert_eq!(
+            model.layers[0].ffn_norm.gamma.data,
+            loaded.layers[0].ffn_norm.gamma.data
+        );
+        assert_eq!(
+            model.layers[0].ffn_norm.beta.data,
+            loaded.layers[0].ffn_norm.beta.data
+        );
+        assert_eq!(
+            model.layers[0].ffn_norm.epsilon,
+            loaded.layers[0].ffn_norm.epsilon
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn checkpoint_roundtrip_preserves_layers() {
+        let model = TinyModel::new_random(test_config(), 55).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "forge_layers_checkpoint_{}.json",
+            std::process::id()
+        ));
+
+        crate::checkpoint::save_checkpoint(&model, &path).unwrap();
+        let loaded = crate::checkpoint::load_checkpoint(&path).unwrap();
+
+        assert_eq!(model.config, loaded.config);
+        assert_eq!(model.layers.len(), loaded.layers.len());
+        for (i, layer) in model.layers.iter().enumerate() {
+            assert_eq!(layer.w_q.data, loaded.layers[i].w_q.data);
+            assert_eq!(layer.w_k.data, loaded.layers[i].w_k.data);
+            assert_eq!(layer.w_v.data, loaded.layers[i].w_v.data);
+        }
 
         let _ = std::fs::remove_file(path);
     }
@@ -625,9 +780,12 @@ mod tests {
     #[test]
     fn incremental_forward_rejects_invalid_position() {
         let model = TinyModel::new_random(test_config(), 1).unwrap();
-        let mut cache =
-            MultiHeadKvCache::empty(model.config.n_heads, model.config.head_dim())
-                .unwrap();
+        let mut cache = ModelKvCache::new(
+            model.config.n_layers,
+            model.config.n_heads,
+            model.config.head_dim(),
+        )
+        .unwrap();
         let err = model.forward_incremental(1, 1, &mut cache).unwrap_err();
         assert!(err.to_string().contains("position"));
     }
@@ -678,14 +836,45 @@ mod tests {
         let logits_with_residual = model.forward(&token_ids).unwrap();
 
         let x = model.embed_tokens(&token_ids).unwrap();
-        let q = x.matmul(&model.w_q).unwrap();
-        let k = x.matmul(&model.w_k).unwrap();
-        let v = x.matmul(&model.w_v).unwrap();
+        let layer = &model.layers[0];
+        let q = x.matmul(&layer.w_q).unwrap();
+        let k = x.matmul(&layer.w_k).unwrap();
+        let v = x.matmul(&layer.w_v).unwrap();
         let attention_only =
             Attention::multi_head_causal(&q, &k, &v, model.config.n_heads).unwrap();
-        let normalized = model.attn_norm.forward(&attention_only).unwrap();
+        let normalized = layer.attn_norm.forward(&attention_only).unwrap();
         let logits_no_residual = normalized.matmul(&model.w_o).unwrap();
 
         assert_ne!(logits_with_residual.data, logits_no_residual.data);
+    }
+
+    #[test]
+    fn model_kv_cache_correct_layer_count() {
+        let cache = ModelKvCache::new(2, 4, 1).unwrap();
+        assert_eq!(cache.layers.len(), 2);
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn model_kv_cache_grows_with_incremental_forward() {
+        let model = TinyModel::new_random(test_config(), 12).unwrap();
+        let mut cache = ModelKvCache::new(
+            model.config.n_layers,
+            model.config.n_heads,
+            model.config.head_dim(),
+        )
+        .unwrap();
+
+        model.forward_incremental(2, 0, &mut cache).unwrap();
+        assert_eq!(cache.len(), 1);
+        for layer_cache in &cache.layers {
+            assert_eq!(layer_cache.len(), 1);
+        }
+
+        model.forward_incremental(5, 1, &mut cache).unwrap();
+        assert_eq!(cache.len(), 2);
+        for layer_cache in &cache.layers {
+            assert_eq!(layer_cache.len(), 2);
+        }
     }
 }

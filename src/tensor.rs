@@ -54,9 +54,7 @@ impl Tensor {
         }
         let expected: usize = shape.iter().product();
         if expected != data_len {
-            bail!(
-                "data length {data_len} does not match shape product {expected}"
-            );
+            bail!("data length {data_len} does not match shape product {expected}");
         }
         Ok(())
     }
@@ -82,10 +80,7 @@ impl Tensor {
             bail!("expected 1D tensor, got {}D", self.ndim());
         }
         if index >= self.shape[0] {
-            bail!(
-                "index {index} out of bounds for length {}",
-                self.shape[0]
-            );
+            bail!("index {index} out of bounds for length {}", self.shape[0]);
         }
         Ok(self.data[index])
     }
@@ -118,11 +113,7 @@ impl Tensor {
     /// Elementwise add; shapes must match exactly.
     pub fn add(&self, other: &Tensor) -> anyhow::Result<Tensor> {
         if self.shape != other.shape {
-            bail!(
-                "shape mismatch: {:?} vs {:?}",
-                self.shape,
-                other.shape
-            );
+            bail!("shape mismatch: {:?} vs {:?}", self.shape, other.shape);
         }
         let data: Vec<f32> = self
             .data
@@ -136,11 +127,7 @@ impl Tensor {
     /// Elementwise add `other` into `self`; shapes must match exactly.
     pub fn add_inplace(&mut self, other: &Tensor) -> anyhow::Result<()> {
         if self.shape != other.shape {
-            bail!(
-                "shape mismatch: {:?} vs {:?}",
-                self.shape,
-                other.shape
-            );
+            bail!("shape mismatch: {:?} vs {:?}", self.shape, other.shape);
         }
         for i in 0..self.data.len() {
             self.data[i] += other.data[i];
@@ -157,11 +144,7 @@ impl Tensor {
     /// Elementwise multiply; shapes must match exactly.
     pub fn mul(&self, other: &Tensor) -> anyhow::Result<Tensor> {
         if self.shape != other.shape {
-            bail!(
-                "shape mismatch: {:?} vs {:?}",
-                self.shape,
-                other.shape
-            );
+            bail!("shape mismatch: {:?} vs {:?}", self.shape, other.shape);
         }
         let data: Vec<f32> = self
             .data
@@ -175,19 +158,22 @@ impl Tensor {
     /// Add a `[1, cols]` row broadcast across all rows of a `[rows, cols]` tensor.
     pub fn add_broadcast_row(&self, row: &Tensor) -> anyhow::Result<Tensor> {
         if self.ndim() != 2 {
-            bail!("add_broadcast_row requires 2D self tensor, got {}D", self.ndim());
+            bail!(
+                "add_broadcast_row requires 2D self tensor, got {}D",
+                self.ndim()
+            );
         }
         if row.ndim() != 2 {
-            bail!("add_broadcast_row requires 2D row tensor, got {}D", row.ndim());
+            bail!(
+                "add_broadcast_row requires 2D row tensor, got {}D",
+                row.ndim()
+            );
         }
 
         let rows = self.shape[0];
         let cols = self.shape[1];
         if row.shape() != &[1, cols] {
-            bail!(
-                "row shape must be [1, {cols}], got {:?}",
-                row.shape()
-            );
+            bail!("row shape must be [1, {cols}], got {:?}", row.shape());
         }
 
         let mut data = Vec::with_capacity(rows * cols);
@@ -248,7 +234,10 @@ impl Tensor {
     /// Per-row normalization: `(x - mean) / sqrt(var + epsilon)`.
     pub fn normalize_last_dim(&self, epsilon: f32) -> anyhow::Result<Tensor> {
         if self.ndim() != 2 {
-            bail!("normalize_last_dim requires 2D tensor, got {}D", self.ndim());
+            bail!(
+                "normalize_last_dim requires 2D tensor, got {}D",
+                self.ndim()
+            );
         }
 
         let mean = self.mean_last_dim()?;
@@ -313,11 +302,7 @@ impl Tensor {
             bail!("cannot softmax empty tensor");
         }
 
-        let max = self
-            .data
-            .iter()
-            .copied()
-            .fold(f32::NEG_INFINITY, f32::max);
+        let max = self.data.iter().copied().fold(f32::NEG_INFINITY, f32::max);
 
         let exps: Vec<f32> = self.data.iter().map(|x| (x - max).exp()).collect();
         let sum: f32 = exps.iter().sum();
@@ -411,7 +396,10 @@ impl Tensor {
             bail!("concat_rows requires 2D left tensor, got {}D", self.ndim());
         }
         if other.ndim() != 2 {
-            bail!("concat_rows requires 2D right tensor, got {}D", other.ndim());
+            bail!(
+                "concat_rows requires 2D right tensor, got {}D",
+                other.ndim()
+            );
         }
 
         let rows_a = self.shape[0];
@@ -420,11 +408,7 @@ impl Tensor {
         let cols_b = other.shape[1];
 
         if cols_a != cols_b {
-            bail!(
-                "concat_rows column mismatch: {} vs {}",
-                cols_a,
-                cols_b
-            );
+            bail!("concat_rows column mismatch: {} vs {}", cols_a, cols_b);
         }
 
         let mut data = Vec::with_capacity(self.data.len() + other.data.len());
@@ -435,11 +419,7 @@ impl Tensor {
     }
 
     /// Slice column range from a 2D tensor: `[rows, cols]` → `[rows, end_col - start_col]`.
-    pub fn slice_cols(
-        &self,
-        start_col: usize,
-        end_col: usize,
-    ) -> anyhow::Result<Tensor> {
+    pub fn slice_cols(&self, start_col: usize, end_col: usize) -> anyhow::Result<Tensor> {
         if self.ndim() != 2 {
             bail!("slice_cols requires 2D tensor, got {}D", self.ndim());
         }
@@ -450,9 +430,7 @@ impl Tensor {
         let rows = self.shape[0];
         let cols = self.shape[1];
         if end_col > cols {
-            bail!(
-                "slice_cols end_col {end_col} out of bounds for {cols} columns"
-            );
+            bail!("slice_cols end_col {end_col} out of bounds for {cols} columns");
         }
 
         let out_cols = end_col - start_col;
@@ -503,7 +481,10 @@ impl Tensor {
     /// Apply softmax independently to each row of a 2D tensor.
     pub fn softmax_rows(&self) -> anyhow::Result<Tensor> {
         if self.ndim() != 2 {
-            bail!("softmax_rows only supports 2D tensors, got {}D", self.ndim());
+            bail!(
+                "softmax_rows only supports 2D tensors, got {}D",
+                self.ndim()
+            );
         }
 
         let rows = self.shape[0];
@@ -563,7 +544,10 @@ mod tests {
     fn indexing_1d_and_2d() {
         // row-major layout for [[1, 2], [3, 4]]
         let t = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], vec![2, 2]).unwrap();
-        assert_eq!(t.get1d(0).unwrap_err().to_string(), "expected 1D tensor, got 2D");
+        assert_eq!(
+            t.get1d(0).unwrap_err().to_string(),
+            "expected 1D tensor, got 2D"
+        );
 
         let one_d = Tensor::new(vec![9.0, 8.0, 7.0], vec![3]).unwrap();
         assert_eq!(one_d.get1d(1).unwrap(), 8.0);

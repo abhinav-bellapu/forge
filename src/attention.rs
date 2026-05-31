@@ -28,11 +28,7 @@ impl KvCache {
         self.keys.shape()[0]
     }
 
-    pub fn append(
-        &mut self,
-        new_keys: &Tensor,
-        new_values: &Tensor,
-    ) -> anyhow::Result<()> {
+    pub fn append(&mut self, new_keys: &Tensor, new_values: &Tensor) -> anyhow::Result<()> {
         Self::validate_pair(new_keys, new_values)?;
 
         let d_model = self.keys.shape()[1];
@@ -95,6 +91,31 @@ impl MultiHeadKvCache {
     }
 }
 
+/// Per-layer KV caches for multi-layer incremental decoding.
+#[derive(Debug, Clone)]
+pub struct ModelKvCache {
+    pub layers: Vec<MultiHeadKvCache>,
+}
+
+impl ModelKvCache {
+    pub fn new(n_layers: usize, n_heads: usize, head_dim: usize) -> anyhow::Result<Self> {
+        if n_layers == 0 {
+            bail!("n_layers must be greater than 0");
+        }
+
+        let mut layers = Vec::with_capacity(n_layers);
+        for _ in 0..n_layers {
+            layers.push(MultiHeadKvCache::empty(n_heads, head_dim)?);
+        }
+        Ok(Self { layers })
+    }
+
+    /// Cached sequence length (same across all layers).
+    pub fn len(&self) -> usize {
+        self.layers.first().map(|c| c.len()).unwrap_or(0)
+    }
+}
+
 /// Single-head scaled dot-product attention.
 #[derive(Debug, Default)]
 pub struct Attention;
@@ -111,11 +132,7 @@ impl Attention {
     /// - `K`: `[seq_len, d_k]`
     /// - `V`: `[seq_len, d_v]`
     /// - output: `[seq_len, d_v]`
-    pub fn scaled_dot_product(
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-    ) -> anyhow::Result<Tensor> {
+    pub fn scaled_dot_product(q: &Tensor, k: &Tensor, v: &Tensor) -> anyhow::Result<Tensor> {
         Self::validate_inputs(q, k, v)?;
 
         let d_k = q.shape()[1];
@@ -201,18 +218,12 @@ impl Attention {
     /// - output: `[1, d_model]`
     ///
     /// Reuses prior K/V instead of recomputing attention over the full sequence.
-    pub fn scaled_dot_product_cached(
-        q_new: &Tensor,
-        cache: &KvCache,
-    ) -> anyhow::Result<Tensor> {
+    pub fn scaled_dot_product_cached(q_new: &Tensor, cache: &KvCache) -> anyhow::Result<Tensor> {
         if q_new.ndim() != 2 {
             bail!("q_new must be a 2D tensor, got {}D", q_new.ndim());
         }
         if q_new.shape()[0] != 1 {
-            bail!(
-                "q_new must have one row, got {}",
-                q_new.shape()[0]
-            );
+            bail!("q_new must have one row, got {}", q_new.shape()[0]);
         }
 
         let d_k = q_new.shape()[1];
@@ -262,9 +273,7 @@ impl Attention {
 
         let d_model = q.shape()[1];
         if d_model % n_heads != 0 {
-            bail!(
-                "d_model {d_model} must be divisible by n_heads {n_heads}"
-            );
+            bail!("d_model {d_model} must be divisible by n_heads {n_heads}");
         }
 
         if k.shape() != q.shape() || v.shape() != q.shape() {
@@ -313,9 +322,7 @@ impl Attention {
 
         let d_model = q_new.shape()[1];
         if d_model % n_heads != 0 {
-            bail!(
-                "d_model {d_model} must be divisible by n_heads {n_heads}"
-            );
+            bail!("d_model {d_model} must be divisible by n_heads {n_heads}");
         }
 
         if k_new.shape() != q_new.shape() || v_new.shape() != q_new.shape() {
@@ -513,10 +520,7 @@ mod tests {
         assert_eq!(single.shape(), multi.shape());
         for r in 0..single.shape()[0] {
             for c in 0..single.shape()[1] {
-                assert!(
-                    (single.get2d(r, c).unwrap() - multi.get2d(r, c).unwrap()).abs()
-                        < 1e-5
-                );
+                assert!((single.get2d(r, c).unwrap() - multi.get2d(r, c).unwrap()).abs() < 1e-5);
             }
         }
     }

@@ -4,7 +4,7 @@ A tiny Rust inference runtime for transformer language models.
 
 ## Current status
 
-Sprint 13 — complete transformer block
+Sprint 14 — stacked transformer layers
 
 ## Implemented
 
@@ -19,6 +19,9 @@ Sprint 13 — complete transformer block
 - Feed-forward network (MLP)
 - Second residual pathway
 - Second LayerNorm
+- Multi-layer transformer architecture
+- Per-layer KV cache
+- Configurable depth (`n_layers`)
 
 ## Quick start
 

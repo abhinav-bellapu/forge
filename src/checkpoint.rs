@@ -77,9 +77,9 @@ pub fn run_save_random_checkpoint(output: &Path, seed: u64) -> anyhow::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use crate::generation::{generate, GenerateRequest};
     use crate::model::ModelConfig;
+    use std::path::PathBuf;
 
     fn test_model() -> TinyModel {
         let config = ModelConfig {
@@ -87,6 +87,7 @@ mod tests {
             max_seq_len: 8,
             d_model: 4,
             n_heads: 4,
+            n_layers: 2,
         };
         TinyModel::new_random(config, 42).unwrap()
     }
@@ -108,14 +109,27 @@ mod tests {
 
         assert_eq!(model.config, loaded.config);
         assert_eq!(model.token_embeddings.data, loaded.token_embeddings.data);
-        assert_eq!(model.w_q.data, loaded.w_q.data);
+        assert_eq!(model.layers[0].w_q.data, loaded.layers[0].w_q.data);
         assert_eq!(model.w_o.data, loaded.w_o.data);
-        assert_eq!(model.attn_norm.gamma.data, loaded.attn_norm.gamma.data);
-        assert_eq!(model.attn_norm.beta.data, loaded.attn_norm.beta.data);
-        assert_eq!(model.ffn.w1.data, loaded.ffn.w1.data);
-        assert_eq!(model.ffn.w2.data, loaded.ffn.w2.data);
-        assert_eq!(model.ffn_norm.gamma.data, loaded.ffn_norm.gamma.data);
-        assert_eq!(model.ffn_norm.beta.data, loaded.ffn_norm.beta.data);
+        assert_eq!(
+            model.layers[0].attn_norm.gamma.data,
+            loaded.layers[0].attn_norm.gamma.data
+        );
+        assert_eq!(
+            model.layers[0].attn_norm.beta.data,
+            loaded.layers[0].attn_norm.beta.data
+        );
+        assert_eq!(model.layers[0].ffn.w1.data, loaded.layers[0].ffn.w1.data);
+        assert_eq!(model.layers[0].ffn.w2.data, loaded.layers[0].ffn.w2.data);
+        assert_eq!(
+            model.layers[0].ffn_norm.gamma.data,
+            loaded.layers[0].ffn_norm.gamma.data
+        );
+        assert_eq!(
+            model.layers[0].ffn_norm.beta.data,
+            loaded.layers[0].ffn_norm.beta.data
+        );
+        assert_eq!(model.layers.len(), loaded.layers.len());
 
         let _ = std::fs::remove_file(path);
     }
@@ -159,10 +173,7 @@ mod tests {
         let out_original = generate(&req, &tokenizer, &model).unwrap();
         let out_loaded = generate(&req, &tokenizer, &loaded).unwrap();
 
-        assert_eq!(
-            out_original.generated_tokens,
-            out_loaded.generated_tokens
-        );
+        assert_eq!(out_original.generated_tokens, out_loaded.generated_tokens);
         assert_eq!(out_original.output_text, out_loaded.output_text);
 
         let _ = std::fs::remove_file(path);
