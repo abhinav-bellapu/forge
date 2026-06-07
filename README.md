@@ -4,7 +4,7 @@ A tiny Rust inference runtime for transformer language models.
 
 ## Current status
 
-Sprint 19 — inference benchmark suite
+work in progress, most recently: inference benchmark suite
 
 ## Implemented
 
