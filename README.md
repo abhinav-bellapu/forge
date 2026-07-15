@@ -4,7 +4,7 @@ A tiny Rust inference runtime for transformer language models.
 
 ## Current status
 
-work in progress, most recently: loss and perplexity evaluation
+work in progress, most recently: learned attention output projections
 
 ## Implemented
 
@@ -15,6 +15,7 @@ work in progress, most recently: loss and perplexity evaluation
 - JSON checkpoint save/load for model weights
 - KV-cached decoding and incremental generation (optimized autoregressive inference)
 - Multi-head causal attention and multi-head KV cache
+- Learned per-layer projection after concatenated attention heads
 - Transformer residual pathways and layer normalization
 - Feed-forward network (MLP) with GELU activation
 - Second residual pathway
@@ -69,6 +70,9 @@ Generate using saved weights:
 ```bash
 cargo run -- generate --prompt "hello" --checkpoint model.json --temperature 0 --seed 42
 ```
+
+Current checkpoints use format v3. Compatible v1/v2 stacked-model checkpoints load with
+identity attention-output projections, preserving their original forward behavior.
 
 ### Benchmarking (local timing only)
 
