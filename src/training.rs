@@ -279,6 +279,36 @@ pub struct TrainingResult {
     pub epochs: Vec<EpochMetrics>,
 }
 
+/// Read-only next-token evaluation summary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EvaluationMetrics {
+    pub loss: f32,
+    pub perplexity: f32,
+    pub examples: usize,
+}
+
+/// Evaluate average next-token cross-entropy and perplexity without updating weights.
+pub fn evaluate(model: &TinyModel, dataset: &TextDataset) -> anyhow::Result<EvaluationMetrics> {
+    if dataset.is_empty() {
+        bail!("dataset has no evaluation examples");
+    }
+
+    let mut total_loss = 0.0f32;
+    for example in &dataset.examples {
+        validate_training_example(model, example)?;
+        let hidden = model.forward_hidden(&example.prefix)?;
+        let logits = model.project_logits(&hidden)?;
+        total_loss += cross_entropy_single(&logits.last_row()?, example.target)?;
+    }
+
+    let loss = total_loss / dataset.len() as f32;
+    Ok(EvaluationMetrics {
+        loss,
+        perplexity: loss.exp(),
+        examples: dataset.len(),
+    })
+}
+
 /// Finite-difference gradient checking utilities (compiled for tests).
 #[cfg(test)]
 pub mod gradcheck {
@@ -1331,6 +1361,41 @@ mod tests {
         cfg.epochs = 1;
         cfg.batch_size = 0;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn evaluation_matches_mean_example_loss_without_mutating_model() {
+        let model = micro_model(false, 40);
+        let dataset = TextDataset::from_tokens_with_context(&[1, 2, 3, 4], 3).unwrap();
+        let token_embeddings_before = model.token_embeddings.data.clone();
+        let positional_embeddings_before = model.positional_embeddings.data.clone();
+        let w_o_before = model.w_o.data.clone();
+
+        let expected_loss: f32 = dataset
+            .examples
+            .iter()
+            .map(|example| compute_example_gradients(&model, example).unwrap().loss)
+            .sum::<f32>()
+            / dataset.len() as f32;
+        let metrics = evaluate(&model, &dataset).unwrap();
+
+        assert!((metrics.loss - expected_loss).abs() < 1e-6);
+        assert!((metrics.perplexity - metrics.loss.exp()).abs() < 1e-6);
+        assert_eq!(metrics.examples, dataset.len());
+        assert_eq!(model.token_embeddings.data, token_embeddings_before);
+        assert_eq!(
+            model.positional_embeddings.data,
+            positional_embeddings_before
+        );
+        assert_eq!(model.w_o.data, w_o_before);
+    }
+
+    #[test]
+    fn evaluation_rejects_empty_dataset() {
+        let model = micro_model(false, 41);
+        let dataset = TextDataset { examples: vec![] };
+        let err = evaluate(&model, &dataset).unwrap_err();
+        assert!(err.to_string().contains("evaluation examples"));
     }
 
     #[test]
