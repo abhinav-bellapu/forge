@@ -21,6 +21,8 @@ pub enum Command {
     Bench(BenchArgs),
     /// Evaluate next-token loss and perplexity on a local text file.
     Eval(EvalArgs),
+    /// Inspect model architecture and parameter counts.
+    Inspect(InspectArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -134,6 +136,17 @@ pub struct EvalArgs {
     pub checkpoint: Option<PathBuf>,
 }
 
+#[derive(clap::Args, Debug)]
+pub struct InspectArgs {
+    /// Seed for random model initialization when no checkpoint is supplied.
+    #[arg(long, default_value_t = 42)]
+    pub seed: u64,
+
+    /// Load model weights from a JSON checkpoint instead of random init.
+    #[arg(long)]
+    pub checkpoint: Option<PathBuf>,
+}
+
 pub fn parse() -> anyhow::Result<Command> {
     Ok(Cli::parse().command)
 }
@@ -180,5 +193,16 @@ mod tests {
             panic!("expected train command");
         };
         assert_eq!(args.max_grad_norm, Some(0.5));
+    }
+
+    #[test]
+    fn inspect_command_parses_checkpoint() {
+        let cli = Cli::try_parse_from(["forge", "inspect", "--checkpoint", "model.json"]).unwrap();
+
+        let Command::Inspect(args) = cli.command else {
+            panic!("expected inspect command");
+        };
+        assert_eq!(args.checkpoint, Some(PathBuf::from("model.json")));
+        assert_eq!(args.seed, 42);
     }
 }
