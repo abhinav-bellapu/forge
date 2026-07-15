@@ -604,6 +604,13 @@ fn validate_training_example(model: &TinyModel, example: &TrainingExample) -> an
     if example.prefix.is_empty() {
         bail!("training example prefix must not be empty");
     }
+    if example.prefix.len() > model.config.max_seq_len {
+        bail!(
+            "training prefix length {} exceeds max_seq_len {}",
+            example.prefix.len(),
+            model.config.max_seq_len
+        );
+    }
     validate_token_ids(model, &example.prefix)?;
     validate_token_id(example.target, TrainDims::from_model(model))?;
     Ok(())
@@ -816,7 +823,6 @@ pub fn run_train(args: &TrainArgs) -> anyhow::Result<()> {
     config.validate()?;
 
     let tokenizer = Tokenizer::from_file(tokenizer::default_vocab_path())?;
-    let dataset = TextDataset::from_file(&args.input, &tokenizer)?;
 
     let mut model = if let Some(path) = &args.checkpoint {
         load_checkpoint(path)?
@@ -832,6 +838,9 @@ pub fn run_train(args: &TrainArgs) -> anyhow::Result<()> {
             tokenizer.vocab_size()
         );
     }
+
+    let dataset =
+        TextDataset::from_file_with_context(&args.input, &tokenizer, model.config.max_seq_len)?;
 
     let result = train(&mut model, &dataset, &config, args.seed)?;
 
@@ -1052,6 +1061,14 @@ mod tests {
     }
 
     #[test]
+    fn validate_training_example_rejects_prefix_beyond_model_context() {
+        let model = micro_model(true, 1);
+        let prefix = vec![1; model.config.max_seq_len + 1];
+        let err = validate_training_example(&model, &example(&prefix, 2)).unwrap_err();
+        assert!(err.to_string().contains("max_seq_len"));
+    }
+
+    #[test]
     fn accumulate_input_embedding_grad_rejects_bad_hidden_size() {
         let dims = TrainDims {
             d_model: 4,
@@ -1260,6 +1277,25 @@ mod tests {
         let path = TempFile::txt("corpus", "hello hello");
         let dataset = TextDataset::from_file(path.path(), &tok).unwrap();
         assert!(dataset.len() >= 10);
+    }
+
+    #[test]
+    fn train_cli_handles_corpus_larger_than_model_context() {
+        let contents = "a".repeat(70);
+        let input = TempFile::txt("long_context", &contents);
+        let output = TempFile::json("long_context");
+        let args = TrainArgs {
+            input: input.path().to_path_buf(),
+            epochs: 1,
+            learning_rate: 0.01,
+            output: output.path().to_path_buf(),
+            batch_size: 8,
+            seed: 42,
+            checkpoint: None,
+        };
+
+        run_train(&args).unwrap();
+        assert!(output.path().exists());
     }
 
     #[test]
