@@ -37,6 +37,54 @@ impl TrainingConfig {
     }
 }
 
+/// Optional safeguards applied to each averaged batch gradient.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TrainingOptions {
+    pub max_grad_norm: Option<f32>,
+}
+
+impl TrainingOptions {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(max_norm) = self.max_grad_norm {
+            if !max_norm.is_finite() || max_norm <= 0.0 {
+                bail!("max_grad_norm must be finite and greater than 0");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Global L2 norm across a collection of gradient buffers.
+pub fn gradient_l2_norm(buffers: &[&[f32]]) -> anyhow::Result<f32> {
+    let mut sum_squares = 0.0f64;
+    for &value in buffers.iter().flat_map(|buffer| buffer.iter()) {
+        if !value.is_finite() {
+            bail!("gradient buffers must contain only finite values");
+        }
+        sum_squares += f64::from(value) * f64::from(value);
+    }
+    let norm = sum_squares.sqrt() as f32;
+    if !norm.is_finite() {
+        bail!("gradient L2 norm is not finite");
+    }
+    Ok(norm)
+}
+
+/// Multiplicative factor that clips `norm` to `max_norm` without changing direction.
+pub fn gradient_clip_factor(norm: f32, max_norm: f32) -> anyhow::Result<f32> {
+    if !norm.is_finite() || norm < 0.0 {
+        bail!("gradient norm must be finite and non-negative");
+    }
+    if !max_norm.is_finite() || max_norm <= 0.0 {
+        bail!("max_grad_norm must be finite and greater than 0");
+    }
+    if norm == 0.0 || norm <= max_norm {
+        Ok(1.0)
+    } else {
+        Ok(max_norm / norm)
+    }
+}
+
 /// One next-token training example: prefix token IDs → target token ID.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrainingExample {
@@ -1413,6 +1461,39 @@ mod tests {
         cfg.epochs = 1;
         cfg.batch_size = 0;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn training_options_validate_gradient_clip_threshold() {
+        assert!(TrainingOptions::default().validate().is_ok());
+        assert!(TrainingOptions {
+            max_grad_norm: Some(1.0)
+        }
+        .validate()
+        .is_ok());
+        for invalid in [0.0, -1.0, f32::INFINITY, f32::NAN] {
+            assert!(TrainingOptions {
+                max_grad_norm: Some(invalid)
+            }
+            .validate()
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn global_gradient_norm_spans_multiple_buffers() {
+        let norm = gradient_l2_norm(&[&[3.0, 4.0], &[12.0]]).unwrap();
+        assert_eq!(norm, 13.0);
+        assert!(gradient_l2_norm(&[&[f32::NAN]]).is_err());
+    }
+
+    #[test]
+    fn gradient_clip_factor_only_scales_large_norms() {
+        assert_eq!(gradient_clip_factor(0.0, 1.0).unwrap(), 1.0);
+        assert_eq!(gradient_clip_factor(0.5, 1.0).unwrap(), 1.0);
+        assert_eq!(gradient_clip_factor(2.0, 1.0).unwrap(), 0.5);
+        assert!(gradient_clip_factor(f32::NAN, 1.0).is_err());
+        assert!(gradient_clip_factor(1.0, 0.0).is_err());
     }
 
     #[test]
