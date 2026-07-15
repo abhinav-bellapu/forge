@@ -9,7 +9,8 @@ use std::io::BufWriter;
 use std::path::Path;
 
 /// Current on-disk checkpoint format version.
-pub const CHECKPOINT_FORMAT_VERSION: u32 = 1;
+pub const CHECKPOINT_FORMAT_VERSION: u32 = 2;
+const COMPATIBLE_LEGACY_FORMAT_VERSION: u32 = 1;
 
 /// Forge model checkpoint (pretty-printed JSON).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,15 +44,39 @@ pub fn load_checkpoint(path: impl AsRef<Path>) -> anyhow::Result<TinyModel> {
     let path = path.as_ref();
     let file = File::open(path)
         .map_err(|e| anyhow::anyhow!("failed to open checkpoint {}: {e}", path.display()))?;
-    let checkpoint: Checkpoint = serde_json::from_reader(file)
+    let value: serde_json::Value = serde_json::from_reader(file)
         .map_err(|e| anyhow::anyhow!("failed to parse checkpoint {}: {e}", path.display()))?;
 
-    if checkpoint.format_version != CHECKPOINT_FORMAT_VERSION {
+    let format_version = value
+        .get("format_version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "checkpoint {} is missing a valid format_version",
+                path.display()
+            )
+        })?;
+
+    if format_version != CHECKPOINT_FORMAT_VERSION
+        && format_version != COMPATIBLE_LEGACY_FORMAT_VERSION
+    {
         bail!(
             "unsupported checkpoint format version {} (expected {CHECKPOINT_FORMAT_VERSION})",
-            checkpoint.format_version
+            format_version
         );
     }
+
+    let checkpoint: Checkpoint = serde_json::from_value(value).map_err(|e| {
+        if format_version == COMPATIBLE_LEGACY_FORMAT_VERSION {
+            anyhow::anyhow!(
+                "checkpoint {} uses an incompatible legacy v1 model schema; regenerate or migrate it: {e}",
+                path.display()
+            )
+        } else {
+            anyhow::anyhow!("failed to parse checkpoint {}: {e}", path.display())
+        }
+    })?;
 
     checkpoint.model.config.validate()?;
     checkpoint.model.validate_shapes()?;
@@ -187,6 +212,48 @@ mod tests {
     fn invalid_checkpoint_path_errors() {
         let err = load_checkpoint("/nonexistent/forge_model.json").unwrap_err();
         assert!(err.to_string().contains("failed to open"));
+    }
+
+    #[test]
+    fn compatible_v1_checkpoint_still_loads() {
+        let model = test_model();
+        let path = temp_path("compatible_v1");
+        let checkpoint = Checkpoint {
+            format_version: COMPATIBLE_LEGACY_FORMAT_VERSION,
+            model: model.clone(),
+        };
+        std::fs::write(&path, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+
+        let loaded = load_checkpoint(&path).unwrap();
+        assert_eq!(loaded.config, model.config);
+        assert_eq!(loaded.token_embeddings.data, model.token_embeddings.data);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn incompatible_v1_checkpoint_has_actionable_error() {
+        let path = temp_path("incompatible_v1");
+        std::fs::write(&path, r#"{"format_version":1,"model":{}}"#).unwrap();
+
+        let err = load_checkpoint(&path).unwrap_err();
+        assert!(err.to_string().contains("incompatible legacy v1"));
+        assert!(err.to_string().contains("regenerate or migrate"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn unknown_version_is_rejected_before_model_deserialization() {
+        let path = temp_path("unknown_version");
+        std::fs::write(&path, r#"{"format_version":999,"model":{}}"#).unwrap();
+
+        let err = load_checkpoint(&path).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("unsupported checkpoint format version 999"));
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
