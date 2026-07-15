@@ -4,7 +4,7 @@ A tiny Rust inference runtime for transformer language models.
 
 ## Current status
 
-work in progress, most recently: trainable positional embeddings
+work in progress, most recently: context-safe training datasets
 
 ## Implemented
 
@@ -27,6 +27,7 @@ work in progress, most recently: trainable positional embeddings
 - Educational output-layer training (embeddings + `w_o`)
 - Hidden-state gradients into prefix token embeddings
 - Input-side gradients into positional embeddings
+- Sliding training windows capped to the model context length
 - Finite-difference gradient checking for trained parameters
 - Local inference benchmarking (`forge bench`, no network or file output by default)
 
@@ -89,6 +90,9 @@ Train on a local UTF-8 `.txt` file and save weights:
 ```bash
 cargo run -- train --input tiny.txt --epochs 5 --learning-rate 0.01 --output trained.json
 ```
+
+Longer corpora are split into sliding next-token examples whose prefixes never exceed
+the loaded model's context length.
 
 Checkpoints are local JSON only (no cloud APIs, no external model formats).
 
