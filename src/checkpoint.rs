@@ -1,6 +1,7 @@
 //! JSON checkpoint save/load for [`TinyModel`].
 
 use crate::model::{ModelConfig, TinyModel};
+use crate::tensor::Tensor;
 use crate::tokenizer::{self, Tokenizer};
 use anyhow::bail;
 use serde::{Deserialize, Serialize};
@@ -9,8 +10,8 @@ use std::io::BufWriter;
 use std::path::Path;
 
 /// Current on-disk checkpoint format version.
-pub const CHECKPOINT_FORMAT_VERSION: u32 = 2;
-const COMPATIBLE_LEGACY_FORMAT_VERSION: u32 = 1;
+pub const CHECKPOINT_FORMAT_VERSION: u32 = 3;
+const OLDEST_COMPATIBLE_FORMAT_VERSION: u32 = 1;
 
 /// Forge model checkpoint (pretty-printed JSON).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,19 +59,27 @@ pub fn load_checkpoint(path: impl AsRef<Path>) -> anyhow::Result<TinyModel> {
             )
         })?;
 
-    if format_version != CHECKPOINT_FORMAT_VERSION
-        && format_version != COMPATIBLE_LEGACY_FORMAT_VERSION
-    {
+    if !(OLDEST_COMPATIBLE_FORMAT_VERSION..=CHECKPOINT_FORMAT_VERSION).contains(&format_version) {
         bail!(
-            "unsupported checkpoint format version {} (expected {CHECKPOINT_FORMAT_VERSION})",
-            format_version
+            "unsupported checkpoint format version {} (supported {OLDEST_COMPATIBLE_FORMAT_VERSION} through {CHECKPOINT_FORMAT_VERSION})",
+            format_version,
         );
     }
 
-    let checkpoint: Checkpoint = serde_json::from_value(value).map_err(|e| {
-        if format_version == COMPATIBLE_LEGACY_FORMAT_VERSION {
+    let mut value = value;
+    if format_version < CHECKPOINT_FORMAT_VERSION {
+        add_legacy_attention_output_projections(&mut value).map_err(|e| {
             anyhow::anyhow!(
-                "checkpoint {} uses an incompatible legacy v1 model schema; regenerate or migrate it: {e}",
+                "checkpoint {} uses an incompatible legacy v{format_version} model schema; regenerate or migrate it: {e}",
+                path.display()
+            )
+        })?;
+    }
+
+    let checkpoint: Checkpoint = serde_json::from_value(value).map_err(|e| {
+        if format_version < CHECKPOINT_FORMAT_VERSION {
+            anyhow::anyhow!(
+                "checkpoint {} uses an incompatible legacy v{format_version} model schema; regenerate or migrate it: {e}",
                 path.display()
             )
         } else {
@@ -82,6 +91,36 @@ pub fn load_checkpoint(path: impl AsRef<Path>) -> anyhow::Result<TinyModel> {
     checkpoint.model.validate_shapes()?;
 
     Ok(checkpoint.model)
+}
+
+/// V1/V2 stacked-model checkpoints predate the learned attention output projection.
+/// Inserting identity matrices preserves their original residual-stream behavior.
+fn add_legacy_attention_output_projections(value: &mut serde_json::Value) -> anyhow::Result<()> {
+    let model = value
+        .get_mut("model")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| anyhow::anyhow!("missing model object"))?;
+    let d_model = model
+        .get("config")
+        .and_then(|config| config.get("d_model"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|size| usize::try_from(size).ok())
+        .ok_or_else(|| anyhow::anyhow!("missing valid model.config.d_model"))?;
+    let layers = model
+        .get_mut("layers")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| anyhow::anyhow!("missing model.layers array"))?;
+    let identity = serde_json::to_value(Tensor::identity(d_model)?)?;
+
+    for (index, layer) in layers.iter_mut().enumerate() {
+        let layer = layer
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("model.layers[{index}] is not an object"))?;
+        layer
+            .entry("w_attn_out".to_string())
+            .or_insert_with(|| identity.clone());
+    }
+    Ok(())
 }
 
 /// Create a random model from the default tokenizer vocab and save it.
@@ -136,6 +175,10 @@ mod tests {
         assert_eq!(model.config, loaded.config);
         assert_eq!(model.token_embeddings.data, loaded.token_embeddings.data);
         assert_eq!(model.layers[0].w_q.data, loaded.layers[0].w_q.data);
+        assert_eq!(
+            model.layers[0].w_attn_out.data,
+            loaded.layers[0].w_attn_out.data
+        );
         assert_eq!(model.w_o.data, loaded.w_o.data);
         assert_eq!(
             model.layers[0].attn_norm.gamma.data,
@@ -215,18 +258,48 @@ mod tests {
     }
 
     #[test]
-    fn compatible_v1_checkpoint_still_loads() {
-        let model = test_model();
-        let path = temp_path("compatible_v1");
-        let checkpoint = Checkpoint {
-            format_version: COMPATIBLE_LEGACY_FORMAT_VERSION,
-            model: model.clone(),
-        };
-        std::fs::write(&path, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+    fn compatible_legacy_checkpoints_gain_identity_attention_projections() {
+        for format_version in [1, 2] {
+            let mut model = test_model();
+            for layer in &mut model.layers {
+                layer.w_attn_out = Tensor::identity(model.config.d_model).unwrap();
+            }
+            let expected_logits = model.forward(&[1, 2, 3]).unwrap();
+            let path = temp_path(&format!("compatible_v{format_version}"));
+            let mut value = serde_json::to_value(Checkpoint {
+                format_version,
+                model: model.clone(),
+            })
+            .unwrap();
+            for layer in value["model"]["layers"].as_array_mut().unwrap() {
+                layer.as_object_mut().unwrap().remove("w_attn_out");
+            }
+            std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
 
-        let loaded = load_checkpoint(&path).unwrap();
-        assert_eq!(loaded.config, model.config);
-        assert_eq!(loaded.token_embeddings.data, model.token_embeddings.data);
+            let loaded = load_checkpoint(&path).unwrap();
+            assert_eq!(loaded.config, model.config);
+            for layer in &loaded.layers {
+                assert_eq!(
+                    layer.w_attn_out,
+                    Tensor::identity(model.config.d_model).unwrap()
+                );
+            }
+            assert_eq!(loaded.forward(&[1, 2, 3]).unwrap(), expected_logits);
+
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn saved_checkpoint_uses_current_format_version() {
+        let path = temp_path("current_version");
+        save_checkpoint(&test_model(), &path).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            value["format_version"].as_u64(),
+            Some(CHECKPOINT_FORMAT_VERSION as u64)
+        );
 
         let _ = std::fs::remove_file(path);
     }

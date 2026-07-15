@@ -163,6 +163,8 @@ pub struct TransformerLayer {
     pub w_k: Tensor,
     /// `[d_model, d_model]`
     pub w_v: Tensor,
+    /// `[d_model, d_model]`
+    pub w_attn_out: Tensor,
 
     pub attn_norm: LayerNorm,
 
@@ -182,6 +184,7 @@ impl TransformerLayer {
             w_q: random_tensor(d_model, d_model, &mut rng)?,
             w_k: random_tensor(d_model, d_model, &mut rng)?,
             w_v: random_tensor(d_model, d_model, &mut rng)?,
+            w_attn_out: random_tensor(d_model, d_model, &mut rng)?,
             attn_norm: LayerNorm::new(d_model)?,
             ffn: FeedForward::new_random(d_model, seed.wrapping_add(1))?,
             ffn_norm: LayerNorm::new(d_model)?,
@@ -194,6 +197,7 @@ impl TransformerLayer {
         let k = x.matmul(&self.w_k)?;
         let v = x.matmul(&self.w_v)?;
         let attention_output = Attention::multi_head_causal(&q, &k, &v, n_heads)?;
+        let attention_output = attention_output.matmul(&self.w_attn_out)?;
         let norm1 = self.attn_norm.forward(&x.add(&attention_output)?)?;
         let ffn_out = self.ffn.forward(&norm1)?;
         let residual2 = norm1.add(&ffn_out)?;
@@ -211,6 +215,7 @@ impl TransformerLayer {
         let k = x.matmul(&self.w_k)?;
         let v = x.matmul(&self.w_v)?;
         let attention_output = Attention::multi_head_cached(&q, &k, &v, cache)?;
+        let attention_output = attention_output.matmul(&self.w_attn_out)?;
         let norm1 = self.attn_norm.forward(&x.add(&attention_output)?)?;
         let ffn_out = self.ffn.forward(&norm1)?;
         let residual2 = norm1.add(&ffn_out)?;
@@ -222,6 +227,11 @@ impl TransformerLayer {
         expect_shape(&self.w_q, &[d_model, d_model], &format!("{prefix}.w_q"))?;
         expect_shape(&self.w_k, &[d_model, d_model], &format!("{prefix}.w_k"))?;
         expect_shape(&self.w_v, &[d_model, d_model], &format!("{prefix}.w_v"))?;
+        expect_shape(
+            &self.w_attn_out,
+            &[d_model, d_model],
+            &format!("{prefix}.w_attn_out"),
+        )?;
         expect_shape(
             &self.attn_norm.gamma,
             &[1, d_model],
@@ -494,6 +504,10 @@ mod tests {
         assert_eq!(model.positional_embeddings.shape(), &[8, 4]);
         assert_eq!(model.w_o.shape(), &[4, 16]);
         assert_eq!(model.layers.len(), 2);
+        assert!(model
+            .layers
+            .iter()
+            .all(|layer| layer.w_attn_out.shape() == [4, 4]));
     }
 
     #[test]
@@ -684,6 +698,18 @@ mod tests {
     }
 
     #[test]
+    fn attention_output_projection_changes_layer_output() {
+        let projected = TransformerLayer::new_random(4, 3).unwrap();
+        let mut zero_projection = projected.clone();
+        zero_projection.w_attn_out = Tensor::zeros(vec![4, 4]).unwrap();
+        let x = Tensor::new(vec![0.1, -0.2, 0.3, 0.4, -0.1, 0.2, 0.5, -0.3], vec![2, 4]).unwrap();
+
+        let with_projection = projected.forward(&x, 2).unwrap();
+        let without_attention = zero_projection.forward(&x, 2).unwrap();
+        assert_ne!(with_projection.data, without_attention.data);
+    }
+
+    #[test]
     fn transformer_layer_incremental_matches_full_forward() {
         let layer = TransformerLayer::new_random(4, 11).unwrap();
         let token_rows = Tensor::new(
@@ -828,6 +854,14 @@ mod tests {
         model.w_o = Tensor::new(vec![0.0; 4], vec![2, 2]).unwrap();
         let err = model.validate_shapes().unwrap_err();
         assert!(err.to_string().contains("w_o"));
+    }
+
+    #[test]
+    fn validate_shapes_rejects_mismatched_attention_output_projection() {
+        let mut model = TinyModel::new_random(test_config(), 1).unwrap();
+        model.layers[0].w_attn_out = Tensor::new(vec![0.0; 4], vec![2, 2]).unwrap();
+        let err = model.validate_shapes().unwrap_err();
+        assert!(err.to_string().contains("w_attn_out"));
     }
 
     #[test]
