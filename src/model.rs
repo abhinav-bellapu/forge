@@ -23,6 +23,18 @@ fn default_tie_embeddings() -> bool {
     true
 }
 
+/// Stored and active parameter counts, with a useful model-component breakdown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParameterCounts {
+    pub token_embeddings: usize,
+    pub positional_embeddings: usize,
+    pub transformer_layers: usize,
+    pub output_projection_stored: usize,
+    pub output_projection_active: usize,
+    pub total_stored: usize,
+    pub total_active: usize,
+}
+
 impl ModelConfig {
     /// Default inference hyperparameters for a given vocabulary size.
     pub fn for_vocab(vocab_size: usize) -> Self {
@@ -301,6 +313,46 @@ impl TinyModel {
         })
     }
 
+    /// Count model parameters, excluding the unused `w_o` from the active total
+    /// when input/output embeddings are tied.
+    pub fn parameter_counts(&self) -> ParameterCounts {
+        let token_embeddings = self.token_embeddings.numel();
+        let positional_embeddings = self.positional_embeddings.numel();
+        let transformer_layers = self
+            .layers
+            .iter()
+            .map(|layer| {
+                layer.w_q.numel()
+                    + layer.w_k.numel()
+                    + layer.w_v.numel()
+                    + layer.w_attn_out.numel()
+                    + layer.attn_norm.gamma.numel()
+                    + layer.attn_norm.beta.numel()
+                    + layer.ffn.w1.numel()
+                    + layer.ffn.w2.numel()
+                    + layer.ffn_norm.gamma.numel()
+                    + layer.ffn_norm.beta.numel()
+            })
+            .sum();
+        let output_projection_stored = self.w_o.numel();
+        let output_projection_active = if self.config.tie_embeddings {
+            0
+        } else {
+            output_projection_stored
+        };
+        let shared = token_embeddings + positional_embeddings + transformer_layers;
+
+        ParameterCounts {
+            token_embeddings,
+            positional_embeddings,
+            transformer_layers,
+            output_projection_stored,
+            output_projection_active,
+            total_stored: shared + output_projection_stored,
+            total_active: shared + output_projection_active,
+        }
+    }
+
     /// Embed token IDs with learned token and positional vectors.
     ///
     /// Output shape: `[seq_len, d_model]`.
@@ -517,6 +569,34 @@ mod tests {
         let model = TinyModel::new_random(cfg, 1).unwrap();
         assert_eq!(model.layers.len(), 3);
         assert!(model.validate_shapes().is_ok());
+    }
+
+    #[test]
+    fn parameter_counts_include_component_breakdown() {
+        let model = TinyModel::new_random(test_config(), 1).unwrap();
+        let counts = model.parameter_counts();
+
+        assert_eq!(counts.token_embeddings, 64);
+        assert_eq!(counts.positional_embeddings, 32);
+        assert_eq!(counts.transformer_layers, 416);
+        assert_eq!(counts.output_projection_stored, 64);
+        assert_eq!(counts.output_projection_active, 0);
+        assert_eq!(counts.total_stored, 576);
+        assert_eq!(counts.total_active, 512);
+    }
+
+    #[test]
+    fn untied_output_projection_counts_as_active() {
+        let mut config = test_config();
+        config.tie_embeddings = false;
+        let model = TinyModel::new_random(config, 1).unwrap();
+        let counts = model.parameter_counts();
+
+        assert_eq!(
+            counts.output_projection_active,
+            counts.output_projection_stored
+        );
+        assert_eq!(counts.total_active, counts.total_stored);
     }
 
     #[test]
