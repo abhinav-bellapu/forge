@@ -53,6 +53,15 @@ pub struct TextDataset {
 impl TextDataset {
     /// Load a local `.txt` file and build prefix → next-token examples.
     pub fn from_file(path: impl AsRef<Path>, tokenizer: &Tokenizer) -> anyhow::Result<Self> {
+        Self::from_file_with_context(path, tokenizer, usize::MAX)
+    }
+
+    /// Load a local `.txt` file using prefixes capped at `max_seq_len` tokens.
+    pub fn from_file_with_context(
+        path: impl AsRef<Path>,
+        tokenizer: &Tokenizer,
+        max_seq_len: usize,
+    ) -> anyhow::Result<Self> {
         let path = path.as_ref();
         let text = fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
@@ -60,11 +69,19 @@ impl TextDataset {
             bail!("training file {} is empty", path.display());
         }
         let tokens = tokenizer.encode(&text, false, false);
-        Self::from_tokens(&tokens)
+        Self::from_tokens_with_context(&tokens, max_seq_len)
     }
 
     /// Build examples from an already-tokenized sequence.
     pub fn from_tokens(tokens: &[usize]) -> anyhow::Result<Self> {
+        Self::from_tokens_with_context(tokens, usize::MAX)
+    }
+
+    /// Build examples with a sliding prefix capped at `max_seq_len` tokens.
+    pub fn from_tokens_with_context(tokens: &[usize], max_seq_len: usize) -> anyhow::Result<Self> {
+        if max_seq_len == 0 {
+            bail!("max_seq_len must be greater than 0");
+        }
         if tokens.len() < 2 {
             bail!(
                 "need at least 2 tokens to form training pairs, got {}",
@@ -73,10 +90,11 @@ impl TextDataset {
         }
 
         let mut examples = Vec::with_capacity(tokens.len() - 1);
-        for i in 0..tokens.len() - 1 {
+        for target_position in 1..tokens.len() {
+            let prefix_start = target_position.saturating_sub(max_seq_len);
             examples.push(TrainingExample {
-                prefix: tokens[..=i].to_vec(),
-                target: tokens[i + 1],
+                prefix: tokens[prefix_start..target_position].to_vec(),
+                target: tokens[target_position],
             });
         }
         Ok(Self { examples })
@@ -1216,6 +1234,24 @@ mod tests {
         assert_eq!(dataset.len(), tokens.len() - 1);
         assert_eq!(dataset.examples[0].prefix, vec![tokens[0]]);
         assert_eq!(dataset.examples[0].target, tokens[1]);
+    }
+
+    #[test]
+    fn dataset_caps_prefixes_with_sliding_context_window() {
+        let dataset = TextDataset::from_tokens_with_context(&[1, 2, 3, 4, 5], 2).unwrap();
+
+        assert_eq!(dataset.examples.len(), 4);
+        assert_eq!(dataset.examples[0], example(&[1], 2));
+        assert_eq!(dataset.examples[1], example(&[1, 2], 3));
+        assert_eq!(dataset.examples[2], example(&[2, 3], 4));
+        assert_eq!(dataset.examples[3], example(&[3, 4], 5));
+        assert!(dataset.examples.iter().all(|item| item.prefix.len() <= 2));
+    }
+
+    #[test]
+    fn dataset_rejects_zero_context_window() {
+        let err = TextDataset::from_tokens_with_context(&[1, 2], 0).unwrap_err();
+        assert!(err.to_string().contains("max_seq_len"));
     }
 
     #[test]
