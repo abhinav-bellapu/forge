@@ -344,6 +344,36 @@ pub mod gradcheck {
         Ok((loss_plus - loss_minus) / (2.0 * eps))
     }
 
+    /// Central-difference gradient for one `positional_embeddings` element.
+    pub fn numerical_positional_embedding_grad(
+        model: &TinyModel,
+        example: &TrainingExample,
+        position: usize,
+        dim: usize,
+        eps: f32,
+    ) -> anyhow::Result<f32> {
+        let dims = TrainDims::from_model(model);
+        if position >= dims.max_seq_len {
+            bail!(
+                "position {position} out of range for max_seq_len {}",
+                dims.max_seq_len
+            );
+        }
+        if dim >= dims.d_model {
+            bail!("dim {dim} out of range for d_model {}", dims.d_model);
+        }
+
+        let idx = position * dims.d_model + dim;
+        let mut plus = model.clone();
+        let mut minus = model.clone();
+        plus.positional_embeddings.data[idx] += eps;
+        minus.positional_embeddings.data[idx] -= eps;
+
+        let loss_plus = example_loss(&plus, example)?;
+        let loss_minus = example_loss(&minus, example)?;
+        Ok((loss_plus - loss_minus) / (2.0 * eps))
+    }
+
     /// Central-difference gradient for one `w_o` element (untied models).
     pub fn numerical_w_o_grad(
         model: &TinyModel,
@@ -1161,6 +1191,21 @@ mod tests {
         let ex = example(&[1, 2], 3);
         let grad = numerical_token_embedding_grad(&model, &ex, 2, 0, DEFAULT_EPS).unwrap();
         assert!(grad.is_finite());
+    }
+
+    #[test]
+    fn numerical_positional_grad_matches_unique_untied_token_input_grad() {
+        let model = micro_model(false, 31);
+        let ex = example(&[1, 2], 3);
+        let token_grad = numerical_token_embedding_grad(&model, &ex, 2, 0, DEFAULT_EPS).unwrap();
+        let position_grad =
+            gradcheck::numerical_positional_embedding_grad(&model, &ex, 1, 0, DEFAULT_EPS).unwrap();
+
+        assert!(gradients_close(
+            token_grad,
+            position_grad,
+            DEFAULT_TOLERANCE
+        ));
     }
 
     #[test]
