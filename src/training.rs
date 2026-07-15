@@ -509,7 +509,19 @@ pub fn train(
     config: &TrainingConfig,
     seed: u64,
 ) -> anyhow::Result<TrainingResult> {
+    train_with_options(model, dataset, config, &TrainingOptions::default(), seed)
+}
+
+/// Train with optional optimizer safeguards such as global gradient clipping.
+pub fn train_with_options(
+    model: &mut TinyModel,
+    dataset: &TextDataset,
+    config: &TrainingConfig,
+    options: &TrainingOptions,
+    seed: u64,
+) -> anyhow::Result<TrainingResult> {
     config.validate()?;
+    options.validate()?;
     if dataset.is_empty() {
         bail!("dataset has no training examples");
     }
@@ -525,7 +537,7 @@ pub fn train(
         let mut num_examples = 0usize;
 
         for batch in shuffled.chunks(config.batch_size) {
-            let batch_loss = train_batch(model, batch, config.learning_rate)?;
+            let batch_loss = train_batch(model, batch, config.learning_rate, options)?;
             epoch_loss += batch_loss * batch.len() as f32;
             num_examples += batch.len();
         }
@@ -599,6 +611,7 @@ fn train_batch(
     model: &mut TinyModel,
     batch: &[TrainingExample],
     learning_rate: f32,
+    options: &TrainingOptions,
 ) -> anyhow::Result<f32> {
     if batch.is_empty() {
         bail!("train_batch received empty batch");
@@ -618,7 +631,22 @@ fn train_batch(
     }
 
     batch_grads.validate(dims, tied)?;
-    apply_batch_gradients(model, &batch_grads, dims, tied, learning_rate / batch_len)?;
+    let average_grad_norm = gradient_l2_norm(&[
+        &batch_grads.token_embeddings,
+        &batch_grads.positional_embeddings,
+        &batch_grads.w_o,
+    ])? / batch_len;
+    let clip_factor = match options.max_grad_norm {
+        Some(max_norm) => gradient_clip_factor(average_grad_norm, max_norm)?,
+        None => 1.0,
+    };
+    apply_batch_gradients(
+        model,
+        &batch_grads,
+        dims,
+        tied,
+        (learning_rate / batch_len) * clip_factor,
+    )?;
 
     Ok(total_loss / batch_len)
 }
@@ -1494,6 +1522,94 @@ mod tests {
         assert_eq!(gradient_clip_factor(2.0, 1.0).unwrap(), 0.5);
         assert!(gradient_clip_factor(f32::NAN, 1.0).is_err());
         assert!(gradient_clip_factor(1.0, 0.0).is_err());
+    }
+
+    #[test]
+    fn default_training_matches_explicit_no_clipping() {
+        let dataset = TextDataset::from_tokens_with_context(&[1, 2, 3, 4], 3).unwrap();
+        let config = TrainingConfig {
+            learning_rate: 0.02,
+            epochs: 2,
+            batch_size: 2,
+        };
+        let mut default_model = micro_model(false, 42);
+        let mut options_model = default_model.clone();
+
+        let default_result = train(&mut default_model, &dataset, &config, 9).unwrap();
+        let options_result = train_with_options(
+            &mut options_model,
+            &dataset,
+            &config,
+            &TrainingOptions::default(),
+            9,
+        )
+        .unwrap();
+
+        assert_eq!(default_result, options_result);
+        assert_eq!(
+            default_model.token_embeddings,
+            options_model.token_embeddings
+        );
+        assert_eq!(
+            default_model.positional_embeddings,
+            options_model.positional_embeddings
+        );
+        assert_eq!(default_model.w_o, options_model.w_o);
+    }
+
+    #[test]
+    fn clipped_training_bounds_global_parameter_update() {
+        let dataset = TextDataset {
+            examples: vec![example(&[1, 2], 3)],
+        };
+        let mut model = micro_model(false, 43);
+        let before_token = model.token_embeddings.data.clone();
+        let before_position = model.positional_embeddings.data.clone();
+        let before_w_o = model.w_o.data.clone();
+        let max_norm = 1e-4;
+
+        train_with_options(
+            &mut model,
+            &dataset,
+            &TrainingConfig {
+                learning_rate: 1.0,
+                epochs: 1,
+                batch_size: 1,
+            },
+            &TrainingOptions {
+                max_grad_norm: Some(max_norm),
+            },
+            1,
+        )
+        .unwrap();
+
+        let token_delta: Vec<f32> = model
+            .token_embeddings
+            .data
+            .iter()
+            .zip(before_token)
+            .map(|(&after, before)| after - before)
+            .collect();
+        let position_delta: Vec<f32> = model
+            .positional_embeddings
+            .data
+            .iter()
+            .zip(before_position)
+            .map(|(&after, before)| after - before)
+            .collect();
+        let w_o_delta: Vec<f32> = model
+            .w_o
+            .data
+            .iter()
+            .zip(before_w_o)
+            .map(|(&after, before)| after - before)
+            .collect();
+        let update_norm = gradient_l2_norm(&[&token_delta, &position_delta, &w_o_delta]).unwrap();
+
+        assert!(
+            update_norm <= max_norm * 1.01,
+            "update norm {update_norm} exceeded clip threshold {max_norm}"
+        );
     }
 
     #[test]
