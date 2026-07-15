@@ -30,6 +30,7 @@ work in progress, most recently: learned attention output projections
 - Input-side gradients into positional embeddings
 - Sliding training windows capped to the model context length
 - Read-only checkpoint evaluation with loss and perplexity (`forge eval`)
+- Optional global gradient clipping for stable local training
 - Finite-difference gradient checking for trained parameters
 - Local inference benchmarking (`forge bench`, no network or file output by default)
 
@@ -94,6 +95,14 @@ Train on a local UTF-8 `.txt` file and save weights:
 
 ```bash
 cargo run -- train --input tiny.txt --epochs 5 --learning-rate 0.01 --output trained.json
+```
+
+Cap the averaged batch gradient's global L2 norm when experimenting with larger
+learning rates:
+
+```bash
+cargo run -- train --input tiny.txt --epochs 5 --learning-rate 0.05 \
+  --max-grad-norm 1.0 --output trained.json
 ```
 
 Longer corpora are split into sliding next-token examples whose prefixes never exceed

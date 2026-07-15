@@ -933,6 +933,10 @@ pub fn run_train(args: &TrainArgs) -> anyhow::Result<()> {
         batch_size: args.batch_size,
     };
     config.validate()?;
+    let options = TrainingOptions {
+        max_grad_norm: args.max_grad_norm,
+    };
+    options.validate()?;
 
     let tokenizer = Tokenizer::from_file(tokenizer::default_vocab_path())?;
 
@@ -954,7 +958,7 @@ pub fn run_train(args: &TrainArgs) -> anyhow::Result<()> {
     let dataset =
         TextDataset::from_file_with_context(&args.input, &tokenizer, model.config.max_seq_len)?;
 
-    let result = train(&mut model, &dataset, &config, args.seed)?;
+    let result = train_with_options(&mut model, &dataset, &config, &options, args.seed)?;
 
     for (i, metrics) in result.epochs.iter().enumerate() {
         println!(
@@ -1434,6 +1438,7 @@ mod tests {
             input: input.path().to_path_buf(),
             epochs: 1,
             learning_rate: 0.01,
+            max_grad_norm: None,
             output: output.path().to_path_buf(),
             batch_size: 8,
             seed: 42,

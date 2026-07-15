@@ -71,9 +71,13 @@ pub struct TrainArgs {
     #[arg(long, default_value_t = 5)]
     pub epochs: usize,
 
-    /// SGD learning rate for output-layer updates.
+    /// SGD learning rate for trainable embeddings and output weights.
     #[arg(long, default_value_t = 0.01)]
     pub learning_rate: f32,
+
+    /// Optional global L2 norm cap for averaged batch gradients.
+    #[arg(long)]
+    pub max_grad_norm: Option<f32>,
 
     /// Output checkpoint JSON path.
     #[arg(long)]
@@ -156,5 +160,25 @@ mod tests {
         assert_eq!(args.input, PathBuf::from("corpus.txt"));
         assert_eq!(args.checkpoint, Some(PathBuf::from("model.json")));
         assert_eq!(args.seed, 42);
+    }
+
+    #[test]
+    fn train_command_parses_gradient_clip_threshold() {
+        let cli = Cli::try_parse_from([
+            "forge",
+            "train",
+            "--input",
+            "corpus.txt",
+            "--output",
+            "model.json",
+            "--max-grad-norm",
+            "0.5",
+        ])
+        .unwrap();
+
+        let Command::Train(args) = cli.command else {
+            panic!("expected train command");
+        };
+        assert_eq!(args.max_grad_norm, Some(0.5));
     }
 }
