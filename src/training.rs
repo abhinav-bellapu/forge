@@ -96,6 +96,7 @@ impl TextDataset {
 struct TrainDims {
     d_model: usize,
     vocab_size: usize,
+    max_seq_len: usize,
 }
 
 impl TrainDims {
@@ -103,6 +104,7 @@ impl TrainDims {
         Self {
             d_model: model.config.d_model,
             vocab_size: model.config.vocab_size,
+            max_seq_len: model.config.max_seq_len,
         }
     }
 
@@ -113,12 +115,17 @@ impl TrainDims {
     fn w_o_len(&self) -> usize {
         self.d_model * self.vocab_size
     }
+
+    fn positional_embedding_len(&self) -> usize {
+        self.max_seq_len * self.d_model
+    }
 }
 
 /// Accumulated analytic gradients for one batch (transformer weights stay frozen).
 #[derive(Debug, Clone, PartialEq)]
 struct BatchGradients {
     token_embeddings: Vec<f32>,
+    positional_embeddings: Vec<f32>,
     w_o: Vec<f32>,
 }
 
@@ -126,6 +133,7 @@ impl BatchGradients {
     fn new(dims: TrainDims, tied: bool) -> Self {
         Self {
             token_embeddings: vec![0.0; dims.embedding_len()],
+            positional_embeddings: vec![0.0; dims.positional_embedding_len()],
             w_o: if tied {
                 Vec::new()
             } else {
@@ -136,6 +144,7 @@ impl BatchGradients {
 
     fn validate(&self, dims: TrainDims, tied: bool) -> anyhow::Result<()> {
         validate_embedding_grad_buffer(&self.token_embeddings, dims)?;
+        validate_positional_embedding_grad_buffer(&self.positional_embeddings, dims)?;
         if tied {
             if !self.w_o.is_empty() {
                 bail!("tied model must not accumulate w_o gradients");
@@ -152,6 +161,7 @@ impl BatchGradients {
 pub struct ExampleGradients {
     pub loss: f32,
     pub grad_token_embeddings: Vec<f32>,
+    pub grad_positional_embeddings: Vec<f32>,
     pub grad_w_o: Vec<f32>,
 }
 
@@ -373,7 +383,7 @@ pub mod gradcheck {
 
 /// Educational training loop: forward through the full model, backprop through the
 /// output projection into `token_embeddings` / `w_o`, and one step into prefix
-/// token embeddings via `hidden_gradient`.
+/// token and positional embeddings via `hidden_gradient`.
 pub fn train(
     model: &mut TinyModel,
     dataset: &TextDataset,
@@ -429,6 +439,7 @@ pub fn compute_example_gradients(
     let loss = cross_entropy_single(&logits_last, example.target)?;
 
     let mut grad_token_embeddings = vec![0.0; dims.embedding_len()];
+    let mut grad_positional_embeddings = vec![0.0; dims.positional_embedding_len()];
     let mut grad_w_o = if tied {
         Vec::new()
     } else {
@@ -441,11 +452,18 @@ pub fn compute_example_gradients(
         accumulate_output_w_o_grad(&mut grad_w_o, &grad_logits, &h_last, dims)?;
     }
 
-    for &token_id in &example.prefix {
+    for (position, &token_id) in example.prefix.iter().enumerate() {
         accumulate_input_embedding_grad(&mut grad_token_embeddings, token_id, &d_hidden, dims)?;
+        accumulate_positional_embedding_grad(
+            &mut grad_positional_embeddings,
+            position,
+            &d_hidden,
+            dims,
+        )?;
     }
 
     validate_embedding_grad_buffer(&grad_token_embeddings, dims)?;
+    validate_positional_embedding_grad_buffer(&grad_positional_embeddings, dims)?;
     if !tied {
         validate_w_o_grad_buffer(&grad_w_o, dims)?;
     }
@@ -453,6 +471,7 @@ pub fn compute_example_gradients(
     Ok(ExampleGradients {
         loss,
         grad_token_embeddings,
+        grad_positional_embeddings,
         grad_w_o,
     })
 }
@@ -493,6 +512,13 @@ fn merge_example_gradients(batch: &mut BatchGradients, example: &ExampleGradient
     {
         *acc += g;
     }
+    for (acc, &g) in batch
+        .positional_embeddings
+        .iter_mut()
+        .zip(example.grad_positional_embeddings.iter())
+    {
+        *acc += g;
+    }
     if !tied {
         for (acc, &g) in batch.w_o.iter_mut().zip(example.grad_w_o.iter()) {
             *acc += g;
@@ -511,6 +537,12 @@ fn apply_batch_gradients(
     apply_embedding_grad(
         &mut model.token_embeddings,
         &batch.token_embeddings,
+        scale,
+        dims,
+    )?;
+    apply_positional_embedding_grad(
+        &mut model.positional_embeddings,
+        &batch.positional_embeddings,
         scale,
         dims,
     )?;
@@ -574,6 +606,17 @@ fn validate_embedding_grad_buffer(grad: &[f32], dims: TrainDims) -> anyhow::Resu
             "token embedding grad length {} does not match expected {}",
             grad.len(),
             dims.embedding_len()
+        );
+    }
+    Ok(())
+}
+
+fn validate_positional_embedding_grad_buffer(grad: &[f32], dims: TrainDims) -> anyhow::Result<()> {
+    if grad.len() != dims.positional_embedding_len() {
+        bail!(
+            "positional embedding grad length {} does not match expected {}",
+            grad.len(),
+            dims.positional_embedding_len()
         );
     }
     Ok(())
@@ -649,6 +692,27 @@ fn accumulate_input_embedding_grad(
     Ok(())
 }
 
+fn accumulate_positional_embedding_grad(
+    grad: &mut [f32],
+    position: usize,
+    d_hidden: &[f32],
+    dims: TrainDims,
+) -> anyhow::Result<()> {
+    validate_positional_embedding_grad_buffer(grad, dims)?;
+    validate_hidden_grad_buffer(d_hidden, dims)?;
+    if position >= dims.max_seq_len {
+        bail!(
+            "position {position} is out of range for max_seq_len {}",
+            dims.max_seq_len
+        );
+    }
+
+    for (d, &hidden_grad) in d_hidden.iter().enumerate() {
+        grad[position * dims.d_model + d] += hidden_grad;
+    }
+    Ok(())
+}
+
 fn apply_embedding_grad(
     embeddings: &mut Tensor,
     grad: &[f32],
@@ -661,6 +725,19 @@ fn apply_embedding_grad(
             let idx = v * dims.d_model + d;
             embeddings.data[idx] -= scale * grad[idx];
         }
+    }
+    Ok(())
+}
+
+fn apply_positional_embedding_grad(
+    embeddings: &mut Tensor,
+    grad: &[f32],
+    scale: f32,
+    dims: TrainDims,
+) -> anyhow::Result<()> {
+    validate_positional_embedding_grad_buffer(grad, dims)?;
+    for (weight, &gradient) in embeddings.data.iter_mut().zip(grad.iter()) {
+        *weight -= scale * gradient;
     }
     Ok(())
 }
@@ -931,6 +1008,7 @@ mod tests {
         let dims = TrainDims {
             d_model: 4,
             vocab_size: 8,
+            max_seq_len: 16,
         };
         let mut grad = vec![0.0; dims.embedding_len()];
         let err = accumulate_input_embedding_grad(&mut grad, 1, &[0.1, 0.2], dims).unwrap_err();
@@ -942,6 +1020,7 @@ mod tests {
         let dims = TrainDims {
             d_model: 4,
             vocab_size: 8,
+            max_seq_len: 16,
         };
         let mut emb = Tensor::zeros(vec![8, 4]).unwrap();
         let err = apply_embedding_grad(&mut emb, &[0.0; 10], 0.01, dims).unwrap_err();
@@ -1031,6 +1110,24 @@ mod tests {
     }
 
     #[test]
+    fn positional_embedding_update_applies_d_hidden_to_each_position() {
+        let model = micro_model(false, 23);
+        let d_hidden = vec![0.1, -0.2, 0.3, -0.4];
+        let dims = TrainDims::from_model(&model);
+        let mut grad = vec![0.0; dims.positional_embedding_len()];
+
+        for position in 0..3 {
+            accumulate_positional_embedding_grad(&mut grad, position, &d_hidden, dims).unwrap();
+        }
+
+        for position in 0..3 {
+            let start = position * dims.d_model;
+            assert_eq!(&grad[start..start + dims.d_model], d_hidden.as_slice());
+        }
+        assert!(grad[3 * dims.d_model..].iter().all(|&value| value == 0.0));
+    }
+
+    #[test]
     fn compute_example_gradients_includes_output_and_prefix_paths() {
         let model = micro_model(true, 24);
         let ex = example(&[2, 5], 3);
@@ -1050,6 +1147,11 @@ mod tests {
         assert!(
             (combined - (output_only + prefix_only)).abs() < 1e-5,
             "combined={combined} output={output_only} prefix={prefix_only}"
+        );
+        assert_eq!(
+            grads.grad_positional_embeddings[dm + 1],
+            prefix_only,
+            "position 1 should receive the input-side hidden gradient"
         );
     }
 
@@ -1353,6 +1455,29 @@ mod tests {
         .unwrap();
 
         assert_ne!(model.token_embeddings.data, emb_before);
+    }
+
+    #[test]
+    fn training_updates_positional_embeddings() {
+        let tok = test_tokenizer();
+        let mut model = tiny_model(89);
+        let path = TempFile::txt("positions", "hello hello hello hello");
+        let dataset = TextDataset::from_file(path.path(), &tok).unwrap();
+        let positions_before = model.positional_embeddings.data.clone();
+
+        train(
+            &mut model,
+            &dataset,
+            &TrainingConfig {
+                learning_rate: 0.05,
+                epochs: 2,
+                batch_size: 2,
+            },
+            7,
+        )
+        .unwrap();
+
+        assert_ne!(model.positional_embeddings.data, positions_before);
     }
 
     #[test]
