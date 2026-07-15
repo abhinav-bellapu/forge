@@ -1,7 +1,5 @@
 //! Tensor operations for Forge inference (row-major `f32` storage).
 
-#![allow(dead_code)] // full API surface; not every method used by the binary yet
-
 use anyhow::bail;
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +41,19 @@ impl Tensor {
             data: vec![0.0; n],
             shape,
         })
+    }
+
+    /// Create a square identity matrix.
+    pub fn identity(size: usize) -> anyhow::Result<Self> {
+        if size == 0 {
+            bail!("identity matrix size must be greater than 0");
+        }
+
+        let mut data = vec![0.0; size * size];
+        for index in 0..size {
+            data[index * size + index] = 1.0;
+        }
+        Self::new(data, vec![size, size])
     }
 
     fn validate_shape(shape: &[usize], data_len: usize) -> anyhow::Result<()> {
@@ -547,6 +558,22 @@ mod tests {
         assert_eq!(t.shape(), &[2, 3]);
         assert_eq!(t.numel(), 6);
         assert!(t.data.iter().all(|&x| x == 0.0));
+    }
+
+    #[test]
+    fn identity_constructor() {
+        let identity = Tensor::identity(3).unwrap();
+        assert_eq!(identity.shape(), &[3, 3]);
+        assert_eq!(
+            identity.data,
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn identity_rejects_zero_size() {
+        let err = Tensor::identity(0).unwrap_err();
+        assert!(err.to_string().contains("greater than 0"));
     }
 
     #[test]
