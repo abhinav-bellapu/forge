@@ -1,16 +1,6 @@
-mod attention;
-mod benchmark;
-mod checkpoint;
-mod cli;
-mod generation;
-mod model;
-mod sampling;
-mod tensor;
-mod tokenizer;
-mod training;
-
 use anyhow::Result;
-use cli::Command;
+use forge::cli::Command;
+use forge::{benchmark, checkpoint, cli, generation, training};
 
 fn main() -> Result<()> {
     match cli::parse()? {
