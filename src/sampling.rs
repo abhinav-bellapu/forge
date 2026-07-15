@@ -78,6 +78,52 @@ impl Sampler {
         let local_idx = sample_from_probabilities(&probs, rng)?;
         Ok(top_indices[local_idx])
     }
+
+    /// Sample from the smallest high-probability token set whose cumulative
+    /// probability reaches `p` (nucleus sampling).
+    pub fn sample_top_p(
+        logits: &[f32],
+        temperature: f32,
+        p: f32,
+        rng: &mut StdRng,
+    ) -> anyhow::Result<usize> {
+        if logits.is_empty() {
+            bail!("logits cannot be empty");
+        }
+        if logits.iter().any(|value| !value.is_finite()) {
+            bail!("logits must contain only finite values");
+        }
+        if !temperature.is_finite() || temperature <= 0.0 {
+            bail!("temperature must be finite and greater than 0 for sampling");
+        }
+        if !p.is_finite() || p <= 0.0 || p > 1.0 {
+            bail!("top-p must be finite and in the interval (0, 1]");
+        }
+
+        let scaled: Vec<f32> = logits.iter().map(|value| value / temperature).collect();
+        let probabilities = softmax_probabilities(&scaled)?;
+        let mut ranked: Vec<(usize, f32)> = probabilities.into_iter().enumerate().collect();
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+        let mut cumulative = 0.0f32;
+        let mut nucleus_len = 0usize;
+        for &(_, probability) in &ranked {
+            cumulative += probability;
+            nucleus_len += 1;
+            if cumulative >= p {
+                break;
+            }
+        }
+        ranked.truncate(nucleus_len);
+
+        let nucleus_sum: f32 = ranked.iter().map(|(_, probability)| probability).sum();
+        let nucleus_probabilities: Vec<f32> = ranked
+            .iter()
+            .map(|(_, probability)| probability / nucleus_sum)
+            .collect();
+        let local_index = sample_from_probabilities(&nucleus_probabilities, rng)?;
+        Ok(ranked[local_index].0)
+    }
 }
 
 /// Numerically stable softmax probabilities for a 1D logit vector.
@@ -166,6 +212,51 @@ mod tests {
         for _ in 0..20 {
             let idx = Sampler::sample_top_k(&logits, 1.0, 100, &mut rng).unwrap();
             assert!(idx < logits.len());
+        }
+    }
+
+    #[test]
+    fn top_p_rejects_invalid_thresholds() {
+        let mut rng = StdRng::seed_from_u64(1);
+        for invalid in [0.0, -0.1, 1.1, f32::NAN] {
+            assert!(Sampler::sample_top_p(&[1.0, 2.0], 1.0, invalid, &mut rng).is_err());
+        }
+    }
+
+    #[test]
+    fn top_p_only_samples_from_nucleus() {
+        let logits = [3.0, 2.0, 1.0, 0.0];
+        let allowed: HashSet<usize> = [0usize, 1].into_iter().collect();
+        let mut rng = StdRng::seed_from_u64(17);
+
+        for _ in 0..100 {
+            let index = Sampler::sample_top_p(&logits, 1.0, 0.75, &mut rng).unwrap();
+            assert!(allowed.contains(&index));
+        }
+    }
+
+    #[test]
+    fn small_top_p_threshold_matches_argmax() {
+        let logits = [5.0, 1.0, 0.0];
+        let mut rng = StdRng::seed_from_u64(2);
+        for _ in 0..20 {
+            assert_eq!(
+                Sampler::sample_top_p(&logits, 1.0, 0.5, &mut rng).unwrap(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn top_p_one_matches_full_sampling_for_ranked_logits() {
+        let logits = [3.0, 2.0, 1.0, 0.0];
+        let mut full_rng = StdRng::seed_from_u64(19);
+        let mut top_p_rng = StdRng::seed_from_u64(19);
+
+        for _ in 0..50 {
+            let full = Sampler::sample_with_temperature(&logits, 0.8, &mut full_rng).unwrap();
+            let top_p = Sampler::sample_top_p(&logits, 0.8, 1.0, &mut top_p_rng).unwrap();
+            assert_eq!(top_p, full);
         }
     }
 }
