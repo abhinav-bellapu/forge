@@ -4,7 +4,7 @@ A tiny Rust inference runtime for transformer language models.
 
 ## Current status
 
-work in progress, most recently: inference benchmark suite
+work in progress, most recently: trainable positional embeddings
 
 ## Implemented
 
@@ -26,6 +26,7 @@ work in progress, most recently: inference benchmark suite
 - Cross-entropy loss and local text dataset loader
 - Educational output-layer training (embeddings + `w_o`)
 - Hidden-state gradients into prefix token embeddings
+- Input-side gradients into positional embeddings
 - Finite-difference gradient checking for trained parameters
 - Local inference benchmarking (`forge bench`, no network or file output by default)
 
@@ -34,8 +35,9 @@ work in progress, most recently: inference benchmark suite
 Forge compares **analytic gradients** (hand-derived backprop through the output layer and
 embedding inputs) against **numerical gradients** (central finite differences on tiny
 deterministic models). This validates the training update path before adding deeper
-backprop through transformer layers. Transformer attention, FFN, and LayerNorm weights
-remain frozen during training.
+backprop through transformer layers. Numerical checks also verify that positional and
+untied token embeddings have the same input-side effect for a unique token position.
+Transformer attention, FFN, and LayerNorm weights remain frozen during training.
 
 ## Quick start
 

@@ -1,4 +1,4 @@
-//! Minimal local training loop with output-layer and embedding-input gradients.
+//! Minimal local training loop with output-layer and token/position input gradients.
 //!
 //! Sprint 18 adds finite-difference gradient checking and validated gradient helpers.
 
