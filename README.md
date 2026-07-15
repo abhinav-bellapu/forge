@@ -4,11 +4,11 @@ A tiny Rust inference runtime for transformer language models.
 
 ## Current status
 
-work in progress, most recently: learned attention output projections
+work in progress, most recently: model inspection and parameter accounting
 
 ## Implemented
 
-- Project skeleton and CLI (`forge generate`, `forge train`)
+- Project skeleton and CLI (`generate`, `train`, `eval`, `bench`, `inspect`)
 - Character-level tokenizer (`vocab.json`, encode/decode)
 - Tensor engine, causal self-attention, minimal `TinyModel` forward pass
 - Autoregressive decoding (greedy, temperature, top-k, seeded sampling)
@@ -31,6 +31,7 @@ work in progress, most recently: learned attention output projections
 - Sliding training windows capped to the model context length
 - Read-only checkpoint evaluation with loss and perplexity (`forge eval`)
 - Optional global gradient clipping for stable local training
+- Active/stored parameter accounting and model inspection (`forge inspect`)
 - Finite-difference gradient checking for trained parameters
 - Local inference benchmarking (`forge bench`, no network or file output by default)
 
@@ -74,6 +75,23 @@ cargo run -- generate --prompt "hello" --checkpoint model.json --temperature 0 -
 
 Current checkpoints use format v3. Compatible v1/v2 stacked-model checkpoints load with
 identity attention-output projections, preserving their original forward behavior.
+
+### Model inspection
+
+Inspect the default architecture, including active and stored parameter counts:
+
+```bash
+cargo run -- inspect --seed 42
+```
+
+Inspect a checkpoint instead:
+
+```bash
+cargo run -- inspect --checkpoint trained.json
+```
+
+For tied embeddings, Forge reports the serialized but inactive standalone output matrix
+separately from the active parameter total.
 
 ### Benchmarking (local timing only)
 
