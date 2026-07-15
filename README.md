@@ -4,7 +4,7 @@ A tiny Rust inference runtime for transformer language models.
 
 ## Current status
 
-work in progress, most recently: context-safe training datasets
+work in progress, most recently: loss and perplexity evaluation
 
 ## Implemented
 
@@ -28,6 +28,7 @@ work in progress, most recently: context-safe training datasets
 - Hidden-state gradients into prefix token embeddings
 - Input-side gradients into positional embeddings
 - Sliding training windows capped to the model context length
+- Read-only checkpoint evaluation with loss and perplexity (`forge eval`)
 - Finite-difference gradient checking for trained parameters
 - Local inference benchmarking (`forge bench`, no network or file output by default)
 
@@ -93,6 +94,16 @@ cargo run -- train --input tiny.txt --epochs 5 --learning-rate 0.01 --output tra
 
 Longer corpora are split into sliding next-token examples whose prefixes never exceed
 the loaded model's context length.
+
+### Evaluation
+
+Evaluate a checkpoint on local text without updating its weights:
+
+```bash
+cargo run -- eval --input validation.txt --checkpoint trained.json
+```
+
+Omit `--checkpoint` to evaluate a reproducible randomly initialized model instead.
 
 Checkpoints are local JSON only (no cloud APIs, no external model formats).
 
