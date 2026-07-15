@@ -3,8 +3,8 @@
 //! Sprint 18 adds finite-difference gradient checking and validated gradient helpers.
 
 use crate::checkpoint::{load_checkpoint, save_checkpoint};
-use crate::cli::TrainArgs;
-use crate::generation::model_config_for_tokenizer;
+use crate::cli::{EvalArgs, TrainArgs};
+use crate::generation::{load_tokenizer_and_model, model_config_for_tokenizer};
 use crate::model::TinyModel;
 use crate::tensor::Tensor;
 use crate::tokenizer::{self, Tokenizer};
@@ -889,6 +889,19 @@ pub fn run_train(args: &TrainArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// CLI entry point for `forge eval`.
+pub fn run_eval(args: &EvalArgs) -> anyhow::Result<()> {
+    let (tokenizer, model) = load_tokenizer_and_model(args.seed, args.checkpoint.as_deref())?;
+    let dataset =
+        TextDataset::from_file_with_context(&args.input, &tokenizer, model.config.max_seq_len)?;
+    let metrics = evaluate(&model, &dataset)?;
+
+    println!("Loss: {:.6}", metrics.loss);
+    println!("Perplexity: {:.6}", metrics.perplexity);
+    println!("Examples: {}", metrics.examples);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::gradcheck::{
@@ -1326,6 +1339,18 @@ mod tests {
 
         run_train(&args).unwrap();
         assert!(output.path().exists());
+    }
+
+    #[test]
+    fn eval_cli_handles_local_corpus() {
+        let input = TempFile::txt("eval", "hello hello");
+        let args = EvalArgs {
+            input: input.path().to_path_buf(),
+            seed: 42,
+            checkpoint: None,
+        };
+
+        run_eval(&args).unwrap();
     }
 
     #[test]

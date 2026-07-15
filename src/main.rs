@@ -10,5 +10,6 @@ fn main() -> Result<()> {
         }
         Command::Train(args) => training::run_train(&args),
         Command::Bench(args) => benchmark::run_bench(&args),
+        Command::Eval(args) => training::run_eval(&args),
     }
 }

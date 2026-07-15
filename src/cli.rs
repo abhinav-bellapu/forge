@@ -19,6 +19,8 @@ pub enum Command {
     Train(TrainArgs),
     /// Benchmark generation throughput (local timing only).
     Bench(BenchArgs),
+    /// Evaluate next-token loss and perplexity on a local text file.
+    Eval(EvalArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -113,6 +115,46 @@ pub struct BenchArgs {
     pub checkpoint: Option<PathBuf>,
 }
 
+#[derive(clap::Args, Debug)]
+pub struct EvalArgs {
+    /// Local UTF-8 evaluation text file.
+    #[arg(long)]
+    pub input: PathBuf,
+
+    /// Seed for random model initialization when no checkpoint is supplied.
+    #[arg(long, default_value_t = 42)]
+    pub seed: u64,
+
+    /// Load model weights from a JSON checkpoint instead of random init.
+    #[arg(long)]
+    pub checkpoint: Option<PathBuf>,
+}
+
 pub fn parse() -> anyhow::Result<Command> {
     Ok(Cli::parse().command)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eval_command_parses() {
+        let cli = Cli::try_parse_from([
+            "forge",
+            "eval",
+            "--input",
+            "corpus.txt",
+            "--checkpoint",
+            "model.json",
+        ])
+        .unwrap();
+
+        let Command::Eval(args) = cli.command else {
+            panic!("expected eval command");
+        };
+        assert_eq!(args.input, PathBuf::from("corpus.txt"));
+        assert_eq!(args.checkpoint, Some(PathBuf::from("model.json")));
+        assert_eq!(args.seed, 42);
+    }
 }
