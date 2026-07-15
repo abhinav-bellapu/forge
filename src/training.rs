@@ -1839,6 +1839,7 @@ mod tests {
             temperature: 0.0,
             seed: Some(1),
             top_k: None,
+            top_p: None,
         };
         let out = generate(&req, &tok, &loaded).unwrap();
         assert_eq!(out.generated_tokens.len(), 2);

@@ -66,6 +66,7 @@ pub fn run_benchmark(config: &BenchmarkConfig) -> anyhow::Result<BenchmarkResult
         temperature: 0.0,
         seed: Some(config.seed),
         top_k: None,
+        top_p: None,
     };
     validate_request(&req)?;
 

@@ -47,6 +47,10 @@ pub struct GenerateArgs {
     #[arg(long)]
     pub top_k: Option<usize>,
 
+    /// Nucleus sampling: keep the smallest token set reaching probability p.
+    #[arg(long)]
+    pub top_p: Option<f32>,
+
     /// Load model weights from a JSON checkpoint instead of random init.
     #[arg(long)]
     pub checkpoint: Option<PathBuf>,
@@ -204,5 +208,16 @@ mod tests {
         };
         assert_eq!(args.checkpoint, Some(PathBuf::from("model.json")));
         assert_eq!(args.seed, 42);
+    }
+
+    #[test]
+    fn generate_command_parses_top_p() {
+        let cli = Cli::try_parse_from(["forge", "generate", "--prompt", "hello", "--top-p", "0.9"])
+            .unwrap();
+
+        let Command::Generate(args) = cli.command else {
+            panic!("expected generate command");
+        };
+        assert_eq!(args.top_p, Some(0.9));
     }
 }

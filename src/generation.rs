@@ -17,6 +17,7 @@ pub struct GenerateRequest {
     pub temperature: f32,
     pub seed: Option<u64>,
     pub top_k: Option<usize>,
+    pub top_p: Option<f32>,
 }
 
 /// Result of autoregressive generation.
@@ -36,6 +37,7 @@ impl From<&GenerateArgs> for GenerateRequest {
             temperature: args.temperature,
             seed: args.seed,
             top_k: args.top_k,
+            top_p: args.top_p,
         }
     }
 }
@@ -48,13 +50,21 @@ pub fn validate_request(req: &GenerateRequest) -> anyhow::Result<()> {
     if req.max_new_tokens == 0 {
         bail!("max_new_tokens must be greater than 0");
     }
-    if req.temperature < 0.0 {
-        bail!("temperature must be >= 0");
+    if !req.temperature.is_finite() || req.temperature < 0.0 {
+        bail!("temperature must be finite and >= 0");
     }
     if let Some(k) = req.top_k {
         if k == 0 {
             bail!("top_k must be greater than 0");
         }
+    }
+    if let Some(p) = req.top_p {
+        if !p.is_finite() || p <= 0.0 || p > 1.0 {
+            bail!("top_p must be finite and in the interval (0, 1]");
+        }
+    }
+    if req.top_k.is_some() && req.top_p.is_some() {
+        bail!("top_k and top_p are mutually exclusive");
     }
     Ok(())
 }
@@ -105,6 +115,10 @@ fn sample_next_token(
 
     if let Some(k) = req.top_k {
         return Sampler::sample_top_k(logits, req.temperature, k, rng);
+    }
+
+    if let Some(p) = req.top_p {
+        return Sampler::sample_top_p(logits, req.temperature, p, rng);
     }
 
     Sampler::sample_with_temperature(logits, req.temperature, rng)
@@ -205,6 +219,7 @@ mod tests {
             temperature: 0.0,
             seed: Some(42),
             top_k: None,
+            top_p: None,
         }
     }
 
@@ -246,6 +261,25 @@ mod tests {
     }
 
     #[test]
+    fn invalid_top_p_errors() {
+        for invalid in [0.0, -0.1, 1.1, f32::NAN] {
+            let mut req = sample_request();
+            req.top_p = Some(invalid);
+            let err = validate_request(&req).unwrap_err();
+            assert!(err.to_string().contains("top_p"));
+        }
+    }
+
+    #[test]
+    fn top_k_and_top_p_are_mutually_exclusive() {
+        let mut req = sample_request();
+        req.top_k = Some(5);
+        req.top_p = Some(0.9);
+        let err = validate_request(&req).unwrap_err();
+        assert!(err.to_string().contains("mutually exclusive"));
+    }
+
+    #[test]
     fn zero_temperature_is_valid() {
         let req = sample_request();
         assert!(validate_request(&req).is_ok());
@@ -283,6 +317,7 @@ mod tests {
             temperature: 1.0,
             seed: Some(1),
             top_k: None,
+            top_p: None,
         };
 
         let (tok_a, model_a) = test_setup(1);
@@ -409,6 +444,7 @@ mod tests {
             temperature: 1.0,
             seed: Some(7),
             top_k: Some(5),
+            top_p: None,
         };
 
         let (tok_a, model_a) = test_setup(7);
@@ -418,6 +454,26 @@ mod tests {
         let out_b = generate(&req, &tok_b, &model_b).unwrap();
 
         assert_eq!(out_a.generated_tokens, out_b.generated_tokens);
+    }
+
+    #[test]
+    fn top_p_generation_is_deterministic_and_matches_full_forward() {
+        let req = GenerateRequest {
+            prompt: "hi".to_string(),
+            max_new_tokens: 6,
+            temperature: 0.8,
+            seed: Some(11),
+            top_k: None,
+            top_p: Some(0.9),
+        };
+        let (tokenizer, model) = test_setup(11);
+
+        let cached = generate(&req, &tokenizer, &model).unwrap();
+        let repeated = generate(&req, &tokenizer, &model).unwrap();
+        let full = generate_full_forward(&req, &tokenizer, &model).unwrap();
+
+        assert_eq!(cached.generated_tokens, repeated.generated_tokens);
+        assert_eq!(cached.generated_tokens, full.generated_tokens);
     }
 
     #[test]

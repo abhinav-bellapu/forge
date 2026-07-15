@@ -4,14 +4,14 @@ A tiny Rust inference runtime for transformer language models.
 
 ## Current status
 
-work in progress, most recently: model inspection and parameter accounting
+work in progress, most recently: nucleus (top-p) sampling
 
 ## Implemented
 
 - Project skeleton and CLI (`generate`, `train`, `eval`, `bench`, `inspect`)
 - Character-level tokenizer (`vocab.json`, encode/decode)
 - Tensor engine, causal self-attention, minimal `TinyModel` forward pass
-- Autoregressive decoding (greedy, temperature, top-k, seeded sampling)
+- Autoregressive decoding (greedy, temperature, top-k, top-p, seeded sampling)
 - JSON checkpoint save/load for model weights
 - KV-cached decoding and incremental generation (optimized autoregressive inference)
 - Multi-head causal attention and multi-head KV cache
@@ -57,7 +57,10 @@ cargo test
 cargo run -- generate --prompt "hello"
 cargo run -- generate --prompt "hello" --temperature 0 --seed 42
 cargo run -- generate --prompt "hello" --temperature 0.8 --top-k 10 --seed 42
+cargo run -- generate --prompt "hello" --temperature 0.8 --top-p 0.9 --seed 42
 ```
+
+`--top-k` and `--top-p` are alternative sampling filters and cannot be combined.
 
 ### Checkpoints
 
