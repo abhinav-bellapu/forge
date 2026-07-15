@@ -152,7 +152,7 @@ mod tests {
         save_checkpoint(&model, &path).unwrap();
         let loaded = load_checkpoint(&path).unwrap();
 
-        assert_eq!(loaded.config.tie_embeddings, false);
+        assert!(!loaded.config.tie_embeddings);
 
         let _ = std::fs::remove_file(path);
     }

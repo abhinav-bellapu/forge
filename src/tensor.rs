@@ -35,7 +35,7 @@ impl Tensor {
         if shape.is_empty() {
             bail!("shape cannot be empty");
         }
-        if shape.iter().any(|&d| d == 0) {
+        if shape.contains(&0) {
             bail!("shape dimensions cannot be zero");
         }
         let n: usize = shape.iter().product();
@@ -49,7 +49,7 @@ impl Tensor {
         if shape.is_empty() {
             bail!("shape cannot be empty");
         }
-        if shape.iter().any(|&d| d == 0) {
+        if shape.contains(&0) {
             bail!("shape dimensions cannot be zero");
         }
         let expected: usize = shape.iter().product();
@@ -145,7 +145,7 @@ impl Tensor {
     ///
     /// `gelu(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`
     pub fn gelu(&self) -> anyhow::Result<Tensor> {
-        const SQRT_2_OVER_PI: f32 = 0.797_884_560_802_865_4;
+        const SQRT_2_OVER_PI: f32 = 0.797_884_6;
         let data: Vec<f32> = self
             .data
             .iter()
@@ -188,7 +188,7 @@ impl Tensor {
 
         let rows = self.shape[0];
         let cols = self.shape[1];
-        if row.shape() != &[1, cols] {
+        if row.shape() != [1, cols] {
             bail!("row shape must be [1, {cols}], got {:?}", row.shape());
         }
 

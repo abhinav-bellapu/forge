@@ -56,7 +56,7 @@ impl ModelConfig {
         if self.n_layers == 0 {
             bail!("n_layers must be greater than 0");
         }
-        if self.d_model % self.n_heads != 0 {
+        if !self.d_model.is_multiple_of(self.n_heads) {
             bail!(
                 "d_model {} must be divisible by n_heads {}",
                 self.d_model,
@@ -328,10 +328,10 @@ impl TinyModel {
 
         let d_model = self.config.d_model;
         let mut data = vec![0.0; d_model];
-        for d in 0..d_model {
+        for (d, value) in data.iter_mut().enumerate() {
             let token_vec = self.token_embeddings.get2d(token_id, d)?;
             let pos_vec = self.positional_embeddings.get2d(position, d)?;
-            data[d] = token_vec + pos_vec;
+            *value = token_vec + pos_vec;
         }
 
         Tensor::new(data, vec![1, d_model])
@@ -978,6 +978,7 @@ mod tests {
         let cache = ModelKvCache::new(2, 4, 1).unwrap();
         assert_eq!(cache.layers.len(), 2);
         assert_eq!(cache.len(), 0);
+        assert!(cache.is_empty());
     }
 
     #[test]
@@ -992,6 +993,7 @@ mod tests {
 
         model.forward_incremental(2, 0, &mut cache).unwrap();
         assert_eq!(cache.len(), 1);
+        assert!(!cache.is_empty());
         for layer_cache in &cache.layers {
             assert_eq!(layer_cache.len(), 1);
         }

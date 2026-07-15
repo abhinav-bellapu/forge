@@ -28,6 +28,11 @@ impl KvCache {
         self.keys.shape()[0]
     }
 
+    /// Whether the cache contains no token positions.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn append(&mut self, new_keys: &Tensor, new_values: &Tensor) -> anyhow::Result<()> {
         Self::validate_pair(new_keys, new_values)?;
 
@@ -89,6 +94,11 @@ impl MultiHeadKvCache {
     pub fn len(&self) -> usize {
         self.heads.first().map(|c| c.len()).unwrap_or(0)
     }
+
+    /// Whether the cache contains no token positions.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// Per-layer KV caches for multi-layer incremental decoding.
@@ -113,6 +123,11 @@ impl ModelKvCache {
     /// Cached sequence length (same across all layers).
     pub fn len(&self) -> usize {
         self.layers.first().map(|c| c.len()).unwrap_or(0)
+    }
+
+    /// Whether the cache contains no token positions.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -239,7 +254,7 @@ impl Attention {
             );
         }
 
-        if cache.len() == 0 {
+        if cache.is_empty() {
             bail!("cache must contain at least one key/value row");
         }
 
@@ -272,7 +287,7 @@ impl Attention {
         }
 
         let d_model = q.shape()[1];
-        if d_model % n_heads != 0 {
+        if !d_model.is_multiple_of(n_heads) {
             bail!("d_model {d_model} must be divisible by n_heads {n_heads}");
         }
 
@@ -321,7 +336,7 @@ impl Attention {
         }
 
         let d_model = q_new.shape()[1];
-        if d_model % n_heads != 0 {
+        if !d_model.is_multiple_of(n_heads) {
             bail!("d_model {d_model} must be divisible by n_heads {n_heads}");
         }
 
@@ -339,7 +354,7 @@ impl Attention {
             let k_h = k_new.slice_cols(start, end)?;
             let v_h = v_new.slice_cols(start, end)?;
 
-            if head_cache.len() == 0 {
+            if head_cache.is_empty() {
                 *head_cache = KvCache::new(k_h, v_h)?;
             } else {
                 head_cache.append(&k_h, &v_h)?;
@@ -530,8 +545,10 @@ mod tests {
         let cache = MultiHeadKvCache::empty(4, 2).unwrap();
         assert_eq!(cache.heads.len(), 4);
         assert_eq!(cache.len(), 0);
+        assert!(cache.is_empty());
         for head in &cache.heads {
             assert_eq!(head.keys.shape(), &[0, 2]);
+            assert!(head.is_empty());
         }
     }
 
@@ -545,6 +562,7 @@ mod tests {
         let out = Attention::multi_head_cached(&q, &k, &v, &mut cache).unwrap();
         assert_eq!(out.shape(), &[1, 4]);
         assert_eq!(cache.len(), 1);
+        assert!(!cache.is_empty());
     }
 
     #[test]
