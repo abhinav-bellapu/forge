@@ -217,20 +217,20 @@ pub fn hidden_gradient(grad_logits: &[f32], model: &TinyModel) -> anyhow::Result
     let mut d_hidden = vec![0.0f32; dims.d_model];
 
     if model.config.tie_embeddings {
-        for d in 0..dims.d_model {
+        for (d, value) in d_hidden.iter_mut().enumerate() {
             let mut sum = 0.0f32;
-            for v in 0..dims.vocab_size {
-                sum += grad_logits[v] * model.token_embeddings.get2d(v, d)?;
+            for (v, &logit_grad) in grad_logits.iter().enumerate() {
+                sum += logit_grad * model.token_embeddings.get2d(v, d)?;
             }
-            d_hidden[d] = sum;
+            *value = sum;
         }
     } else {
-        for d in 0..dims.d_model {
+        for (d, value) in d_hidden.iter_mut().enumerate() {
             let mut sum = 0.0f32;
-            for v in 0..dims.vocab_size {
-                sum += grad_logits[v] * model.w_o.get2d(d, v)?;
+            for (v, &logit_grad) in grad_logits.iter().enumerate() {
+                sum += logit_grad * model.w_o.get2d(d, v)?;
             }
-            d_hidden[d] = sum;
+            *value = sum;
         }
     }
 
@@ -735,6 +735,7 @@ mod tests {
     use crate::checkpoint::{load_checkpoint, save_checkpoint};
     use crate::generation::{generate, GenerateRequest};
     use crate::model::ModelConfig;
+    use std::collections::BTreeSet;
     use std::path::PathBuf;
 
     struct TempFile(PathBuf);
@@ -886,12 +887,12 @@ mod tests {
             .map(|i| (i as f32 * 0.01) - 0.5)
             .collect();
         let d_hidden = hidden_gradient(&grad_logits, &model).unwrap();
-        for d in 0..model.config.d_model {
+        for (d, &actual) in d_hidden.iter().enumerate() {
             let mut expected = 0.0f32;
-            for v in 0..model.config.vocab_size {
-                expected += grad_logits[v] * model.w_o.get2d(d, v).unwrap();
+            for (v, &logit_grad) in grad_logits.iter().enumerate() {
+                expected += logit_grad * model.w_o.get2d(d, v).unwrap();
             }
-            assert!((d_hidden[d] - expected).abs() < 1e-5);
+            assert!((actual - expected).abs() < 1e-5);
         }
     }
 
@@ -902,12 +903,12 @@ mod tests {
             .map(|i| (i as f32 * 0.01) - 0.5)
             .collect();
         let d_hidden = hidden_gradient(&grad_logits, &model).unwrap();
-        for d in 0..model.config.d_model {
+        for (d, &actual) in d_hidden.iter().enumerate() {
             let mut expected = 0.0f32;
-            for v in 0..model.config.vocab_size {
-                expected += grad_logits[v] * model.token_embeddings.get2d(v, d).unwrap();
+            for (v, &logit_grad) in grad_logits.iter().enumerate() {
+                expected += logit_grad * model.token_embeddings.get2d(v, d).unwrap();
             }
-            assert!((d_hidden[d] - expected).abs() < 1e-5);
+            assert!((actual - expected).abs() < 1e-5);
         }
     }
 
@@ -1016,10 +1017,10 @@ mod tests {
         }
 
         for &token_id in &[2usize, 5] {
-            for d in 0..dims.d_model {
+            for (d, &hidden_grad) in d_hidden.iter().enumerate() {
                 let idx = token_id * dims.d_model + d;
                 let expected =
-                    d_hidden[d] * ex.prefix.iter().filter(|&&t| t == token_id).count() as f32;
+                    hidden_grad * ex.prefix.iter().filter(|&&t| t == token_id).count() as f32;
                 assert!(
                     (grad_e[idx] - expected).abs() < 1e-6,
                     "token {token_id} dim {d}: got {} expected {expected}",
@@ -1172,7 +1173,12 @@ mod tests {
         let dataset = TextDataset::from_tokens(&tokens).unwrap();
         let mut model = tiny_model(55);
 
-        let distinct: Vec<usize> = tokens.iter().copied().collect();
+        let distinct: Vec<usize> = tokens
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         let before: Vec<Vec<f32>> = distinct
             .iter()
             .map(|&id| embedding_row(&model, id))
