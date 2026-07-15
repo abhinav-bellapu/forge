@@ -211,12 +211,7 @@ pub fn cross_entropy_loss(logits: &Tensor, targets: &[usize]) -> anyhow::Result<
             bail!("target {target} at row {row} is out of vocab range {vocab_size}");
         }
         let row_logits = logits.row(row)?;
-        let probs = row_logits.softmax()?;
-        let p = probs.get1d(target)?;
-        if p <= 0.0 {
-            bail!("softmax probability for target {target} is non-positive");
-        }
-        total -= p.ln();
+        total += cross_entropy_single(&row_logits.data, target)?;
     }
 
     Ok(total / seq_len as f32)
@@ -224,12 +219,10 @@ pub fn cross_entropy_loss(logits: &Tensor, targets: &[usize]) -> anyhow::Result<
 
 /// Gradient of cross-entropy loss w.r.t. logits at the final position.
 pub fn logits_gradient(logits: &[f32], target: usize) -> anyhow::Result<Vec<f32>> {
+    validate_classification_logits(logits, target)?;
     let row = Tensor::new(logits.to_vec(), vec![logits.len()])?;
     let probs = row.softmax()?;
     let mut grad = probs.data;
-    if target >= grad.len() {
-        bail!("target {target} out of logits range {}", grad.len());
-    }
     grad[target] -= 1.0;
     Ok(grad)
 }
@@ -719,10 +712,23 @@ fn validate_w_o_grad_buffer(grad: &[f32], dims: TrainDims) -> anyhow::Result<()>
 }
 
 fn cross_entropy_single(logits: &[f32], target: usize) -> anyhow::Result<f32> {
-    let row = Tensor::new(logits.to_vec(), vec![logits.len()])?;
-    let probs = row.softmax()?;
-    let p = probs.get1d(target)?;
-    Ok(-p.ln())
+    validate_classification_logits(logits, target)?;
+    let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let sum_exp: f32 = logits.iter().map(|&value| (value - max_logit).exp()).sum();
+    Ok(max_logit + sum_exp.ln() - logits[target])
+}
+
+fn validate_classification_logits(logits: &[f32], target: usize) -> anyhow::Result<()> {
+    if logits.is_empty() {
+        bail!("logits must not be empty");
+    }
+    if target >= logits.len() {
+        bail!("target {target} out of logits range {}", logits.len());
+    }
+    if logits.iter().any(|value| !value.is_finite()) {
+        bail!("logits must contain only finite values");
+    }
+    Ok(())
 }
 
 fn accumulate_output_tied_grad(
@@ -1023,6 +1029,27 @@ mod tests {
         let a = cross_entropy_loss(&logits, &[1, 0]).unwrap();
         let b = cross_entropy_loss(&logits, &[1, 0]).unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn cross_entropy_stays_finite_for_extreme_logits() {
+        let logits = Tensor::new(vec![1000.0, 999.0, -1000.0], vec![1, 3]).unwrap();
+        let correct = cross_entropy_loss(&logits, &[0]).unwrap();
+        let incorrect = cross_entropy_loss(&logits, &[2]).unwrap();
+
+        assert!(correct.is_finite());
+        assert!(incorrect.is_finite());
+        assert!(correct < incorrect);
+        assert!((correct - 0.313_232_42).abs() < 1e-4);
+    }
+
+    #[test]
+    fn classification_loss_and_gradient_reject_non_finite_logits() {
+        let err = cross_entropy_single(&[0.0, f32::NAN], 0).unwrap_err();
+        assert!(err.to_string().contains("finite"));
+
+        let err = logits_gradient(&[0.0, f32::INFINITY], 0).unwrap_err();
+        assert!(err.to_string().contains("finite"));
     }
 
     #[test]
