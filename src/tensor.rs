@@ -1,6 +1,7 @@
 //! Tensor operations for Forge inference (row-major `f32` storage).
 
 use anyhow::bail;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// Dense tensor stored in row-major order.
@@ -305,16 +306,43 @@ impl Tensor {
         }
 
         let mut out = vec![0.0; m * n];
-        for i in 0..m {
-            for j in 0..n {
-                let mut sum = 0.0f32;
-                for t in 0..k {
-                    let a = self.data[i * k + t];
-                    let b = other.data[t * n + j];
-                    sum += a * b;
+
+        // Partition by output row so workers write to disjoint memory. The
+        // k-j loop order streams contiguous rows of the right operand and is
+        // substantially more cache-friendly than the original i-j-k kernel.
+        let compute_row = |(i, out_row): (usize, &mut [f32])| {
+            for t in 0..k {
+                let a = self.data[i * k + t];
+                let rhs_row = &other.data[t * n..(t + 1) * n];
+                for (dst, &b) in out_row.iter_mut().zip(rhs_row.iter()) {
+                    *dst += a * b;
                 }
-                out[i * n + j] = sum;
             }
+        };
+
+        let work = m.saturating_mul(k).saturating_mul(n);
+        if work >= 32 * 1024 && m == 1 {
+            // Coarse output-column tiles preserve contiguous access to each
+            // right-hand weight row while exposing incremental decoding work
+            // to Rayon without creating one tiny task per output element.
+            const COLUMN_TILE: usize = 128;
+            out.par_chunks_mut(COLUMN_TILE)
+                .enumerate()
+                .for_each(|(tile, out_tile)| {
+                    let start = tile * COLUMN_TILE;
+                    for inner in 0..k {
+                        let activation = self.data[inner];
+                        let width = out_tile.len();
+                        let rhs = &other.data[inner * n + start..inner * n + start + width];
+                        for (dst, &weight) in out_tile.iter_mut().zip(rhs.iter()) {
+                            *dst += activation * weight;
+                        }
+                    }
+                });
+        } else if work >= 32 * 1024 {
+            out.par_chunks_mut(n).enumerate().for_each(compute_row);
+        } else {
+            out.chunks_mut(n).enumerate().for_each(compute_row);
         }
 
         Self::new(out, vec![m, n])

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use forge::cli::Command;
-use forge::{benchmark, checkpoint, cli, generation, inspection, training};
+use forge::{benchmark, checkpoint, cli, generation, gpt2, inspection, training};
 
 fn main() -> Result<()> {
     match cli::parse()? {
@@ -12,5 +12,8 @@ fn main() -> Result<()> {
         Command::Bench(args) => benchmark::run_bench(&args),
         Command::Eval(args) => training::run_eval(&args),
         Command::Inspect(args) => inspection::run_inspect(&args),
+        Command::Gpt2Generate(args) => gpt2::run_generate(&args),
+        Command::Gpt2Bench(args) => gpt2::run_benchmark(&args),
+        Command::Gpt2Logits(args) => gpt2::run_logits(&args),
     }
 }

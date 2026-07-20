@@ -1,0 +1,12 @@
+{
+  "reference": "huggingface-pytorch",
+  "candidate": "forge-fp32",
+  "prompt": "The future of machine learning is",
+  "tokens": 6,
+  "logits": 50257,
+  "max_absolute_error": 0.00015569335937470896,
+  "mean_absolute_error": 6.037144412676727e-05,
+  "reference_argmax": 287,
+  "candidate_argmax": 287,
+  "argmax_match": true
+}

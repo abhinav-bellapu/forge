@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-/// Forge — a tiny Rust inference runtime for transformer language models.
+/// Forge — a Rust inference runtime for transformer language models.
 #[derive(Parser, Debug)]
 #[command(name = "forge", version, about)]
 pub struct Cli {
@@ -23,6 +23,81 @@ pub enum Command {
     Eval(EvalArgs),
     /// Inspect model architecture and parameter counts.
     Inspect(InspectArgs),
+    /// Generate text with a Hugging Face GPT-2 SafeTensors model directory.
+    Gpt2Generate(Gpt2GenerateArgs),
+    /// Benchmark GPT-2 FP32/INT8 inference and parallel speedup.
+    Gpt2Bench(Gpt2BenchArgs),
+    /// Export GPT-2 token IDs and last-position logits for parity checks.
+    Gpt2Logits(Gpt2LogitsArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct Gpt2GenerateArgs {
+    /// Directory containing config.json, model.safetensors, and tokenizer.json.
+    #[arg(long)]
+    pub model_dir: PathBuf,
+
+    #[arg(long)]
+    pub prompt: String,
+
+    #[arg(long, default_value_t = 20)]
+    pub max_new_tokens: u32,
+
+    #[arg(long, default_value_t = 0.0)]
+    pub temperature: f32,
+
+    #[arg(long, default_value_t = 42)]
+    pub seed: u64,
+
+    #[arg(long)]
+    pub top_k: Option<usize>,
+
+    #[arg(long)]
+    pub top_p: Option<f32>,
+
+    /// Quantize model matrices to symmetric per-channel INT8 before inference.
+    #[arg(long)]
+    pub int8: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct Gpt2BenchArgs {
+    /// Directory containing config.json, model.safetensors, and tokenizer.json.
+    #[arg(long)]
+    pub model_dir: PathBuf,
+
+    #[arg(long, default_value = "The future of machine learning is")]
+    pub prompt: String,
+
+    #[arg(long, default_value_t = 8)]
+    pub max_new_tokens: u32,
+
+    #[arg(long, default_value_t = 3)]
+    pub runs: u32,
+
+    /// Benchmark the INT8 model instead of FP32.
+    #[arg(long)]
+    pub int8: bool,
+
+    /// Optional machine-readable benchmark report.
+    #[arg(long)]
+    pub json_output: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct Gpt2LogitsArgs {
+    #[arg(long)]
+    pub model_dir: PathBuf,
+
+    #[arg(long)]
+    pub prompt: String,
+
+    /// JSON output path consumed by scripts/compare_logits.py.
+    #[arg(long)]
+    pub output: PathBuf,
+
+    #[arg(long)]
+    pub int8: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -219,5 +294,24 @@ mod tests {
             panic!("expected generate command");
         };
         assert_eq!(args.top_p, Some(0.9));
+    }
+
+    #[test]
+    fn gpt2_generate_command_parses_model_dir_and_int8() {
+        let cli = Cli::try_parse_from([
+            "forge",
+            "gpt2-generate",
+            "--model-dir",
+            "models/gpt2",
+            "--prompt",
+            "hello",
+            "--int8",
+        ])
+        .unwrap();
+        let Command::Gpt2Generate(args) = cli.command else {
+            panic!("expected gpt2-generate command");
+        };
+        assert_eq!(args.model_dir, PathBuf::from("models/gpt2"));
+        assert!(args.int8);
     }
 }

@@ -1,0 +1,12 @@
+{
+  "reference": "huggingface-pytorch",
+  "candidate": "forge-fp32",
+  "prompt": "Hello, my name is",
+  "tokens": 5,
+  "logits": 50257,
+  "max_absolute_error": 7.01489257863841e-05,
+  "mean_absolute_error": 1.746081206076756e-05,
+  "reference_argmax": 1757,
+  "candidate_argmax": 1757,
+  "argmax_match": true
+}

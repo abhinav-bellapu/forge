@@ -1,0 +1,12 @@
+{
+  "reference": "huggingface-pytorch",
+  "candidate": "forge-int8",
+  "prompt": "Hello, my name is",
+  "tokens": 5,
+  "logits": 50257,
+  "max_absolute_error": 1.3849869814453086,
+  "mean_absolute_error": 0.29668266016861805,
+  "reference_argmax": 1757,
+  "candidate_argmax": 1757,
+  "argmax_match": true
+}

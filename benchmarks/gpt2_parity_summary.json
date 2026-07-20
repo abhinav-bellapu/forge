@@ -1,0 +1,10 @@
+{
+  "model": "gpt2",
+  "reference": "huggingface-pytorch",
+  "candidate": "forge-fp32",
+  "prompts": 3,
+  "compared_logits": 150771,
+  "maximum_absolute_error": 0.00018754394531583785,
+  "argmax_matches": 3,
+  "argmax_total": 3
+}

@@ -1,10 +1,12 @@
 # Forge
 
-A tiny Rust inference runtime for transformer language models.
+A Rust inference runtime for transformer language models, from educational
+building blocks through Hugging Face GPT-2 compatibility.
 
 ## Current status
 
-work in progress, most recently: nucleus (top-p) sampling
+work in progress, most recently: GPT-2 SafeTensors inference, INT8 quantization,
+and parallel CPU kernels
 
 ## Implemented
 
@@ -34,6 +36,62 @@ work in progress, most recently: nucleus (top-p) sampling
 - Active/stored parameter accounting and model inspection (`forge inspect`)
 - Finite-difference gradient checking for trained parameters
 - Local inference benchmarking (`forge bench`, no network or file output by default)
+- Hugging Face GPT-2 `config.json` + `model.safetensors` loading
+- GPT-2 BPE tokenization from `tokenizer.json`
+- GPT-2 pre-LayerNorm blocks, fused QKV projections, final LayerNorm, and tied logits
+- Symmetric per-channel INT8 weight quantization for embeddings and linear layers
+- Cache-friendly tiled matrix multiplication with Rayon CPU parallelism
+- Full-vocabulary logit parity tooling against Hugging Face/PyTorch
+- Machine-readable FP32/INT8 throughput and memory benchmarks
+
+## GPT-2 inference
+
+Download the public GPT-2 artifacts (about 524 MiB, gitignored):
+
+```bash
+bash scripts/download_gpt2.sh
+```
+
+Generate with FP32 weights:
+
+```bash
+cargo run --release -- gpt2-generate \
+  --model-dir models/gpt2 \
+  --prompt "Hello, my name is" \
+  --max-new-tokens 20
+```
+
+Quantize all matrix weights to per-channel INT8 before generation:
+
+```bash
+cargo run --release -- gpt2-generate \
+  --model-dir models/gpt2 \
+  --prompt "Hello, my name is" \
+  --max-new-tokens 20 \
+  --int8
+```
+
+### Reproduced GPT-2 results
+
+On an Apple M5 CPU (10 cores), the checked-in five-run reports measured:
+
+- `2.98x` INT8 parallel speedup (65.34 vs 21.92 tokens/s)
+- `74.82%` model-weight memory reduction (474.7 MiB to 119.5 MiB)
+- `1.876e-4` maximum FP32 logit error versus Hugging Face across 150,771 logits
+- matching argmax tokens on all three validation prompts
+
+See [`benchmarks/`](benchmarks/) for the reports and exact reproduction commands.
+
+Run an FP32 or INT8 benchmark and optionally save JSON:
+
+```bash
+cargo run --release -- gpt2-bench \
+  --model-dir models/gpt2 \
+  --max-new-tokens 8 \
+  --runs 5 \
+  --int8 \
+  --json-output /tmp/gpt2-int8.json
+```
 
 ## Gradient checking
 

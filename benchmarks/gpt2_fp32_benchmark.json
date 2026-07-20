@@ -1,0 +1,15 @@
+{
+  "fp32_bytes": 497759232,
+  "max_new_tokens": 8,
+  "memory_reduction_percent": 0.0,
+  "model": "gpt2",
+  "parallel_speedup": 3.3801421689530238,
+  "parallel_threads": 10,
+  "parallel_tokens_per_second": 46.71343510684335,
+  "parameters": 124439808,
+  "precision": "fp32",
+  "prompt": "The future of machine learning is",
+  "runs": 5,
+  "single_thread_tokens_per_second": 13.819961638274085,
+  "stored_bytes": 497759232
+}

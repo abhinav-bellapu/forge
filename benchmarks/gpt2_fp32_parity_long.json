@@ -1,0 +1,12 @@
+{
+  "reference": "huggingface-pytorch",
+  "candidate": "forge-fp32",
+  "prompt": "In a distant future, engineers built intelligent machines that learned from every experiment.",
+  "tokens": 15,
+  "logits": 50257,
+  "max_absolute_error": 0.00018754394531583785,
+  "mean_absolute_error": 7.317824419595092e-05,
+  "reference_argmax": 198,
+  "candidate_argmax": 198,
+  "argmax_match": true
+}
